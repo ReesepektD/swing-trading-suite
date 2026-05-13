@@ -186,7 +186,7 @@ BEFORE EVERY TRADE:
  □ Setup type: VCP / Darvas / Momentum / Pullback?
  □ Volume ≥ 1.5× avg on breakout candle?
  □ MACD bullish?
- □ RSI in range (50–70 entry, 40–55 pullback)?
+ □ RSI in range (55–70 entry, 40–55 pullback)?
  □ Stop set? (2× ATR below entry)
  □ Position size calculated? (max 1.5% portfolio risk)
  □ First profit target set? (3× ATR / 10% gain)
