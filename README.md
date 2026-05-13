@@ -29,7 +29,9 @@ applied to QQQ (Invesco QQQ Trust — Nasdaq-100 ETF).
 - **Stage shading** — green background = Stage 2 bull, red = Stage 4 bear
 - **Entry labels** — ENTRY (Momentum / Darvas BO / VCP) and ADD (Pullback)
 - **Exit labels** — triggered by EMA50 break on volume or Stage 4 onset
-- **Info table** (top-right) — real-time dashboard: Trend Template score, Stage, VCP, MACD, RSI, Volume, Stop, Target
+- **Gamma Flip ~** — dotted line at the nearest $5 QQQ strike (approximate gamma flip level)
+- **OpEx Week** — orange background on the third Friday of each month (peak gamma ramp risk)
+- **Info table** (top-right) — real-time dashboard: Trend Template score, Stage, VCP, MACD, RSI, Volume, Stop, Target, Gamma Regime, OpEx Week, Gamma Flip
 
 ## How to Install
 
@@ -37,7 +39,7 @@ applied to QQQ (Invesco QQQ Trust — Nasdaq-100 ETF).
 2. Open **Pine Editor** (bottom of screen)
 3. Paste the entire contents of `QQQ_SwingSuite.pine`
 4. Click **Add to chart**
-5. Configure alerts using the built-in `alertcondition` triggers (Momentum Entry, Darvas BO, VCP, Pullback, Exit)
+5. Configure alerts using the built-in `alertcondition` triggers (Momentum Entry, Darvas BO, VCP, Pullback, Exit, Negative Gamma, OpEx Week)
 
 ## Core Trading Philosophy
 

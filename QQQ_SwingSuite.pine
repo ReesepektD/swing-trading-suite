@@ -9,6 +9,8 @@ darvas_len  = input.int(20,     "Darvas Lookback",         group="Darvas Box")
 show_vcp    = input.bool(true,  "Show VCP Band",           group="VCP (Minervini)")
 vcp_len     = input.int(10,     "VCP Lookback", minval=5,  group="VCP (Minervini)")
 show_stage  = input.bool(true,  "Show Stage Shading",      group="Stage Analysis")
+show_gamma  = input.bool(true,  "Show Gamma Overlay",      group="Gamma / OpEx")
+vix_neg_lvl = input.float(20.0, "Negative Gamma VIX Level",group="Gamma / OpEx", step=0.5)
 rsi_len     = input.int(14,     "RSI Length",              group="Oscillators")
 rsi_ob      = input.int(70,     "RSI Overbought",          group="Oscillators")
 rsi_os      = input.int(40,     "RSI Oversold Floor",      group="Oscillators")
@@ -80,6 +82,16 @@ rsi_pullback     = rsi >= rsi_os and rsi < 55
 macd_bull        = macd_l > sig_l and macd_l > 0
 macd_cross       = ta.crossover(macd_l, sig_l)
 
+// ── Gamma / OpEx ─────────────────────────────────────────────────────────────
+vix        = request.security("CBOE:VIX", timeframe.period, close, ignore_invalid_symbol=true)
+neg_gamma  = not na(vix) and vix > vix_neg_lvl
+is_opex_wk = dayofweek == dayofweek.friday and dayofmonth >= 15 and dayofmonth <= 21
+gamma_flip = math.round(close / 5) * 5.0
+
+bgcolor(show_gamma and is_opex_wk ? color.new(color.orange, 88) : na, title="OpEx Week")
+plot(show_gamma ? gamma_flip : na, "Gamma Flip ~", color=color.new(color.orange, 50),
+     linewidth=1, style=plot.style_circles)
+
 // ── Volume ────────────────────────────────────────────────────────────────────
 vol_surge = volume > ta.sma(volume, vol_len) * vol_mult
 
@@ -106,7 +118,7 @@ if exit_signal
               textcolor=color.white, size=size.small)
 
 // ── Dashboard Table ───────────────────────────────────────────────────────────
-var table t = table.new(position.top_right, 2, 9,
+var table t = table.new(position.top_right, 2, 12,
                         border_width=1, border_color=color.new(color.gray, 50),
                         bgcolor=color.new(color.black, 10))
 
@@ -130,8 +142,15 @@ if barstate.islast
     f_cell(1, 6, vol_surge ? "Yes" : "No",       vol_surge ? c_ok : c_na)
     f_cell(0, 7, "Stop",            c_na)
     f_cell(1, 7, str.tostring(math.round(close - atr * atr_sl, 2)), c_na)
-    f_cell(0, 8, "Target",          c_na)
-    f_cell(1, 8, str.tostring(math.round(close + atr * atr_tp, 2)), c_na)
+    f_cell(0, 8,  "Target",          c_na)
+    f_cell(1, 8,  str.tostring(math.round(close + atr * atr_tp, 2)), c_na)
+    f_cell(0, 9,  "Gamma Regime",   c_na)
+    f_cell(1, 9,  neg_gamma ? "Negative" : na(vix) ? "N/A" : "Positive",
+                  neg_gamma ? c_no : na(vix) ? c_na : c_ok)
+    f_cell(0, 10, "OpEx Week",      c_na)
+    f_cell(1, 10, is_opex_wk ? "Yes" : "No", is_opex_wk ? color.new(color.orange, 20) : c_na)
+    f_cell(0, 11, "Gamma Flip ~",   c_na)
+    f_cell(1, 11, "$" + str.tostring(gamma_flip, "#.##"), c_na)
 
 // ── Alerts ────────────────────────────────────────────────────────────────────
 alertcondition(entry_mom,    "QQQ Momentum Entry",  "QQQ: Momentum entry")
@@ -139,3 +158,5 @@ alertcondition(entry_darvas, "QQQ Darvas Breakout", "QQQ: Darvas box breakout")
 alertcondition(entry_vcp,    "QQQ VCP Entry",       "QQQ: VCP setup triggered")
 alertcondition(entry_pullbk, "QQQ Pullback Add",    "QQQ: Pullback re-entry")
 alertcondition(exit_signal,  "QQQ Exit",            "QQQ: Exit signal — EMA50 break or Stage 4")
+alertcondition(neg_gamma,    "QQQ Negative Gamma",  "QQQ: VIX above threshold — negative gamma regime, reduce size")
+alertcondition(is_opex_wk,   "QQQ OpEx Week",       "QQQ: Monthly options expiration week — expect amplified moves")
