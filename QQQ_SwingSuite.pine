@@ -75,7 +75,7 @@ plot(show_vcp and vcp_ok ? ta.lowest(low,   vcp_len) : na, "VCP Lo", color=color
 
 // ── Oscillators ───────────────────────────────────────────────────────────────
 rsi              = ta.rsi(close, rsi_len)
-rsi_momentum     = rsi > 50 and rsi < rsi_ob
+rsi_momentum     = rsi > 55 and rsi < rsi_ob
 rsi_pullback     = rsi >= rsi_os and rsi < 55
 
 [macd_l, sig_l, _] = ta.macd(close, macd_fast, macd_slow, macd_sig)
@@ -85,7 +85,8 @@ macd_cross       = ta.crossover(macd_l, sig_l)
 // ── Gamma / OpEx ─────────────────────────────────────────────────────────────
 vix        = request.security("CBOE:VIX", timeframe.period, close, ignore_invalid_symbol=true)
 neg_gamma  = not na(vix) and vix > vix_neg_lvl
-is_opex_wk = dayofweek == dayofweek.friday and dayofmonth >= 15 and dayofmonth <= 21
+fri_dom    = dayofmonth + (dayofweek.friday - dayofweek)
+is_opex_wk = dayofweek >= dayofweek.monday and dayofweek <= dayofweek.friday and fri_dom >= 15 and fri_dom <= 21
 gamma_flip = math.round(close / 5) * 5.0
 
 bgcolor(show_gamma and is_opex_wk ? color.new(color.orange, 88) : na, title="OpEx Week")
@@ -142,15 +143,15 @@ if barstate.islast
     f_cell(1, 6, vol_surge ? "Yes" : "No",       vol_surge ? c_ok : c_na)
     f_cell(0, 7, "Stop",            c_na)
     f_cell(1, 7, str.tostring(math.round(close - atr * atr_sl, 2)), c_na)
-    f_cell(0, 8,  "Target",          c_na)
+    f_cell(0, 8,  "Target",       c_na)
     f_cell(1, 8,  str.tostring(math.round(close + atr * atr_tp, 2)), c_na)
-    f_cell(0, 9,  "Gamma Regime",   c_na)
+    f_cell(0, 9,  "Gamma Regime", c_na)
     f_cell(1, 9,  neg_gamma ? "Negative" : na(vix) ? "N/A" : "Positive",
                   neg_gamma ? c_no : na(vix) ? c_na : c_ok)
-    f_cell(0, 10, "OpEx Week",      c_na)
+    f_cell(0, 10, "OpEx Week",    c_na)
     f_cell(1, 10, is_opex_wk ? "Yes" : "No", is_opex_wk ? color.new(color.orange, 20) : c_na)
-    f_cell(0, 11, "Gamma Flip ~",   c_na)
-    f_cell(1, 11, "$" + str.tostring(gamma_flip, "#.##"), c_na)
+    f_cell(0, 11, "Gamma Flip ~", c_na)
+    f_cell(1, 11, "$" + str.tostring(int(gamma_flip)), c_na)
 
 // ── Alerts ────────────────────────────────────────────────────────────────────
 alertcondition(entry_mom,    "QQQ Momentum Entry",  "QQQ: Momentum entry")
