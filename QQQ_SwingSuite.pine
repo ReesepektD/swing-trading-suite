@@ -78,7 +78,7 @@ rsi              = ta.rsi(close, rsi_len)
 rsi_momentum     = rsi > 55 and rsi < rsi_ob
 rsi_pullback     = rsi >= rsi_os and rsi < 55
 
-[macd_l, sig_l, _] = ta.macd(close, macd_fast, macd_slow, macd_sig)
+[macd_l, sig_l, macd_h] = ta.macd(close, macd_fast, macd_slow, macd_sig)
 macd_bull        = macd_l > sig_l and macd_l > 0
 macd_cross       = ta.crossover(macd_l, sig_l)
 
@@ -151,7 +151,7 @@ if barstate.islast
     f_cell(0, 10, "OpEx Week",    c_na)
     f_cell(1, 10, is_opex_wk ? "Yes" : "No", is_opex_wk ? color.new(color.orange, 20) : c_na)
     f_cell(0, 11, "Gamma Flip ~", c_na)
-    f_cell(1, 11, "$" + str.tostring(int(gamma_flip)), c_na)
+    f_cell(1, 11, "$" + str.tostring(math.floor(gamma_flip)), c_na)
 
 // ── Alerts ────────────────────────────────────────────────────────────────────
 alertcondition(entry_mom,    "QQQ Momentum Entry",  "QQQ: Momentum entry")
