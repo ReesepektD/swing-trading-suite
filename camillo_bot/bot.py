@@ -25,6 +25,7 @@ from .broker import AlpacaBroker, DryRunBroker, BaseBroker
 from .config import Config
 from .database import Database
 from .executor import Executor
+from .notifier import EmailNotifier
 
 # Import scanner from parent directory
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -35,11 +36,13 @@ ET  = zoneinfo.ZoneInfo("America/New_York")
 
 
 class CamilloBot:
-    def __init__(self, broker: BaseBroker, config: Config, db: Database):
+    def __init__(self, broker: BaseBroker, config: Config, db: Database,
+                 notifier: EmailNotifier = None):
         self.broker   = broker
         self.config   = config
         self.db       = db
         self.executor = Executor(broker, db, config)
+        self.notifier = notifier or EmailNotifier.from_env()
         self._scanner = SocialArbitrageScanner(
             reddit_creds={
                 "client_id":     config.reddit_client_id,
@@ -89,6 +92,14 @@ class CamilloBot:
 
         self.executor.print_portfolio_summary()
 
+        if self.notifier:
+            try:
+                account   = self.broker.get_account()
+                positions = self.db.get_all_positions()
+                self.notifier.send_scan_report(results, positions, account.equity)
+            except Exception as exc:
+                log.warning("Scan email failed: %s", exc)
+
     def run_exit_check(self, force: bool = False):
         """
         Intraday/close job: evaluate exit conditions on all open positions.
@@ -116,6 +127,14 @@ class CamilloBot:
         """End-of-day portfolio snapshot."""
         log.info("━━━ DAILY SUMMARY ━━━  %s", date.today().isoformat())
         self.executor.print_portfolio_summary()
+
+        if self.notifier:
+            try:
+                account   = self.broker.get_account()
+                positions = self.db.get_all_positions()
+                self.notifier.send_daily_summary(positions, account.equity)
+            except Exception as exc:
+                log.warning("Daily summary email failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Scheduler loop

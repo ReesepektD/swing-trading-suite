@@ -1,0 +1,258 @@
+//@version=5
+strategy("QQQ Bot Strategy", shorttitle="QQQ-BOT",
+         overlay=true, max_labels_count=500,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=15,
+         initial_capital=100000,
+         commission_type=strategy.commission.percent,
+         commission_value=0.05,
+         slippage=2)
+
+// ── Inputs ────────────────────────────────────────────────────────────────────
+show_emas   = input.bool(true,  "Show EMAs (21/50)",        group="Display")
+show_smas   = input.bool(true,  "Show SMAs (150/200)",      group="Display")
+show_darvas = input.bool(true,  "Show Darvas Box",          group="Display")
+show_vcp    = input.bool(true,  "Show VCP Band",            group="Display")
+show_stage  = input.bool(true,  "Show Stage Shading",       group="Display")
+show_bb     = input.bool(true,  "Show Break & Bounce",      group="Display")
+show_tt     = input.bool(true,  "Show Touch & Turn",        group="Display")
+
+darvas_len  = input.int(20,     "Darvas Lookback",          group="Darvas Box")
+vcp_len     = input.int(10,     "VCP Lookback", minval=5,   group="VCP")
+rsi_len     = input.int(14,     "RSI Length",               group="Oscillators")
+rsi_ob      = input.int(70,     "RSI Overbought",           group="Oscillators")
+rsi_os      = input.int(40,     "RSI Oversold Floor",       group="Oscillators")
+macd_fast   = input.int(12,     "MACD Fast",                group="Oscillators")
+macd_slow   = input.int(26,     "MACD Slow",                group="Oscillators")
+macd_sig    = input.int(9,      "MACD Signal",              group="Oscillators")
+vol_len     = input.int(20,     "Volume MA Length",         group="Volume")
+vol_mult    = input.float(1.5,  "Volume Surge Multiplier",  group="Volume")
+atr_len     = input.int(14,     "ATR Length",               group="Risk")
+atr_sl      = input.float(2.0,  "Stop-Loss ATR Mult",       group="Risk")
+atr_tp      = input.float(3.0,  "Take-Profit ATR Mult",     group="Risk")
+touch_tol   = input.float(0.4,  "Touch Tolerance %",        group="Touch & Turn", step=0.1)
+bb_confirm  = input.bool(true,  "Require Volume on Bounce", group="Break & Bounce")
+en_mom      = input.bool(true,  "Momentum Entry",           group="Strategies")
+en_darvas   = input.bool(true,  "Darvas Breakout",          group="Strategies")
+en_vcp      = input.bool(true,  "VCP Entry",                group="Strategies")
+en_pullbk   = input.bool(true,  "Pullback Re-Entry",        group="Strategies")
+en_bb       = input.bool(true,  "Break & Bounce",           group="Strategies")
+en_tt       = input.bool(true,  "Touch & Turn",             group="Strategies")
+
+// ── Colors ────────────────────────────────────────────────────────────────────
+var c_ok = color.new(color.green,  20)
+var c_no = color.new(color.red,    20)
+var c_na = color.new(color.gray,   60)
+var c_hd = color.new(#1565C0,      10)
+var c_bb = color.new(#FF6F00,      10)
+var c_tt = color.new(#7B1FA2,      10)
+
+// ── Moving Averages ───────────────────────────────────────────────────────────
+ema21  = ta.ema(close, 21)
+ema50  = ta.ema(close, 50)
+sma150 = ta.sma(close, 150)
+sma200 = ta.sma(close, 200)
+
+plot(show_emas ? ema21  : na, "EMA 21",  color=#00E5FF, linewidth=1)
+plot(show_emas ? ema50  : na, "EMA 50",  color=#FF9800, linewidth=1)
+plot(show_smas ? sma150 : na, "SMA 150", color=#AB47BC, linewidth=1)
+plot(show_smas ? sma200 : na, "SMA 200", color=#EF5350, linewidth=2)
+
+// ── Trend Template (Minervini) ────────────────────────────────────────────────
+tt1      = close  > sma200
+tt2      = sma200 > sma200[21]
+tt3      = sma150 > sma200
+tt4      = ema50  > sma150 and ema50 > sma200
+tt5      = close  > ema50
+tt6      = close  >= ta.lowest(low, 252)  * 1.30
+tt7      = close  >= ta.highest(high, 252) * 0.75
+tt_score = (tt1?1:0)+(tt2?1:0)+(tt3?1:0)+(tt4?1:0)+(tt5?1:0)+(tt6?1:0)+(tt7?1:0)
+
+// ── Stage Analysis (Weinstein) ────────────────────────────────────────────────
+slope  = sma200 - sma200[10]
+stage2 = close > sma200 and slope > 0
+stage4 = close < sma200 and slope < 0
+
+bgcolor(show_stage and stage2 ? color.new(color.green, 93) : na, title="Stage 2")
+bgcolor(show_stage and stage4 ? color.new(color.red,   93) : na, title="Stage 4")
+
+// ── Darvas Box ────────────────────────────────────────────────────────────────
+d_top     = ta.highest(high, darvas_len)
+d_bot     = ta.lowest(low,   darvas_len)
+darvas_bo = close > d_top[1]
+
+plot(show_darvas ? d_top : na, "Darvas Top",    color=color.new(color.yellow, 40), linewidth=1, style=plot.style_stepline)
+plot(show_darvas ? d_bot : na, "Darvas Bottom", color=color.new(color.yellow, 40), linewidth=1, style=plot.style_stepline)
+
+// ── VCP ───────────────────────────────────────────────────────────────────────
+atr    = ta.atr(atr_len)
+vcp_ok = atr < atr[vcp_len] * 0.70
+
+plot(show_vcp and vcp_ok ? ta.highest(high, vcp_len) : na, "VCP Hi", color=color.new(#26C6DA, 55), linewidth=1, style=plot.style_circles)
+plot(show_vcp and vcp_ok ? ta.lowest(low,   vcp_len) : na, "VCP Lo", color=color.new(#26C6DA, 55), linewidth=1, style=plot.style_circles)
+
+// ── Oscillators ───────────────────────────────────────────────────────────────
+rsi          = ta.rsi(close, rsi_len)
+rsi_momentum = rsi > 55 and rsi < rsi_ob
+rsi_pullback = rsi >= rsi_os and rsi < 55
+
+[macd_l, sig_l, _] = ta.macd(close, macd_fast, macd_slow, macd_sig)
+macd_bull    = macd_l > sig_l and macd_l > 0
+macd_cross   = ta.crossover(macd_l, sig_l)
+
+// ── Volume ────────────────────────────────────────────────────────────────────
+vol_ma    = ta.sma(volume, vol_len)
+vol_surge = volume > vol_ma * vol_mult
+vol_dry   = volume < vol_ma * 0.75
+
+// ── Risk ──────────────────────────────────────────────────────────────────────
+sl_price = close - atr * atr_sl
+tp_price = close + atr * atr_tp
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  BREAK & BOUNCE
+//  A key level breaks on a prior bar (false breakdown / bear trap),
+//  then price closes back above that level — often with a surge of demand.
+//
+//  Levels watched: EMA21, EMA50, Darvas Bottom
+//  Rules:
+//    • Prior bar closes BELOW the level (the "break")
+//    • Current bar closes ABOVE the level (the "bounce")
+//    • Bounce candle is bullish (close > open)
+//    • Stage 2 context preferred (or at least not Stage 4)
+//    • Optional volume surge on the bounce candle
+// ══════════════════════════════════════════════════════════════════════════════
+bb_ema21  = close[1] < ema21[1] and close > ema21  and close > open
+bb_ema50  = close[1] < ema50[1] and close > ema50  and close > open
+bb_darvas = close[1] < d_bot[1] and close > d_bot  and close > open
+
+bb_vol_ok = bb_confirm ? vol_surge : true
+
+entry_bb  = en_bb and not stage4 and tt_score >= 4 and
+            (bb_ema21 or bb_ema50 or bb_darvas) and bb_vol_ok
+
+bb_level  = bb_darvas ? "Darvas Bot" : bb_ema50 ? "EMA 50" : "EMA 21"
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  TOUCH & TURN
+//  Price dips to (or slightly below) a key level intrabar but CLOSES above it,
+//  signaling the level held as support — a rejection candle.
+//
+//  Levels watched: EMA21, EMA50, SMA200, Darvas Bottom
+//  Rules:
+//    • The bar's LOW touches within touch_tol% of the level
+//    • The bar CLOSES above the level
+//    • Close is in the upper half of the bar (wick rejection)
+//    • Trend Template score ≥ 5 and Stage 2
+//    • Volume should be drying up (institutions not distributing)
+// ══════════════════════════════════════════════════════════════════════════════
+tol        = touch_tol / 100
+
+tt_ema21   = low <= ema21  * (1 + tol) and close > ema21  and close > (low + high) / 2
+tt_ema50   = low <= ema50  * (1 + tol) and close > ema50  and close > (low + high) / 2
+tt_sma200  = low <= sma200 * (1 + tol) and close > sma200 and close > (low + high) / 2
+tt_darvas  = low <= d_bot  * (1 + tol) and close > d_bot  and close > (low + high) / 2
+
+entry_tt   = en_tt and stage2 and tt_score >= 5 and
+             (tt_ema21 or tt_ema50 or tt_sma200 or tt_darvas)
+
+tt_level   = tt_sma200 ? "SMA 200" : tt_darvas ? "Darvas Bot" : tt_ema50 ? "EMA 50" : "EMA 21"
+
+// ── Existing Strategies ───────────────────────────────────────────────────────
+entry_mom    = en_mom    and tt_score >= 6 and stage2 and macd_bull and rsi_momentum and vol_surge
+entry_darvas = en_darvas and darvas_bo and tt_score >= 5 and vol_surge
+entry_vcp    = en_vcp    and vcp_ok and tt_score >= 5 and macd_cross and vol_surge
+entry_pullbk = en_pullbk and tt_score == 7 and stage2 and rsi_pullback and close > ema21 and macd_bull and vol_dry
+
+// ── Exit ──────────────────────────────────────────────────────────────────────
+exit_hard    = (ta.crossunder(close, ema50) and vol_surge) or stage4
+exit_trail   = ta.crossunder(close, ema21) and strategy.position_size > 0
+
+// ── Strategy Orders ───────────────────────────────────────────────────────────
+if entry_mom
+    strategy.entry("Momentum", strategy.long, comment="MOM")
+if entry_darvas
+    strategy.entry("Darvas BO", strategy.long, comment="DARV")
+if entry_vcp
+    strategy.entry("VCP", strategy.long, comment="VCP")
+if entry_pullbk
+    strategy.entry("Pullback", strategy.long, comment="PB")
+if entry_bb
+    strategy.entry("Brk+Bounce", strategy.long, comment="B&B")
+if entry_tt
+    strategy.entry("Touch+Turn", strategy.long, comment="T&T")
+
+if strategy.position_size > 0
+    strategy.exit("SL/TP", stop=strategy.position_avg_price - atr * atr_sl,
+                           limit=strategy.position_avg_price + atr * atr_tp)
+if exit_hard
+    strategy.close_all(comment="Hard Exit")
+
+// ── Labels ────────────────────────────────────────────────────────────────────
+if entry_mom or entry_darvas or entry_vcp
+    txt = entry_mom ? "ENTRY  Momentum" : entry_darvas ? "ENTRY  Darvas BO" : "ENTRY  VCP"
+    label.new(bar_index, low * 0.995, txt, style=label.style_label_up,
+              color=color.new(color.lime, 10), textcolor=color.black, size=size.small)
+
+if entry_pullbk
+    label.new(bar_index, low * 0.995, "ADD  Pullback", style=label.style_label_up,
+              color=color.new(color.teal, 10), textcolor=color.white, size=size.tiny)
+
+if show_bb and entry_bb
+    label.new(bar_index, low * 0.993,
+              "B&B\n" + bb_level, style=label.style_label_up,
+              color=c_bb, textcolor=color.white, size=size.small)
+
+if show_tt and entry_tt
+    label.new(bar_index, low * 0.993,
+              "T&T\n" + tt_level, style=label.style_label_up,
+              color=c_tt, textcolor=color.white, size=size.small)
+
+if exit_hard
+    label.new(bar_index, high * 1.005, stage4 ? "EXIT  Stage 4" : "EXIT  EMA50 Break",
+              style=label.style_label_down, color=color.new(color.red, 10),
+              textcolor=color.white, size=size.small)
+
+// ── Dashboard ─────────────────────────────────────────────────────────────────
+var table t = table.new(position.top_right, 2, 12,
+                        border_width=1, border_color=color.new(color.gray, 50),
+                        bgcolor=color.new(color.black, 10))
+
+f_cell(col, row, txt, bg) =>
+    table.cell(t, col, row, txt, text_color=color.white, text_size=size.small, bgcolor=bg)
+
+if barstate.islast
+    f_cell(0, 0,  "QQQ BOT STRATEGY",  c_hd)
+    f_cell(1, 0,  "",                  c_hd)
+    f_cell(0, 1,  "Trend Template",    c_na)
+    f_cell(1, 1,  str.tostring(tt_score) + "/7", tt_score >= 6 ? c_ok : tt_score >= 4 ? c_na : c_no)
+    f_cell(0, 2,  "Stage",             c_na)
+    f_cell(1, 2,  stage2 ? "2 — Bull" : stage4 ? "4 — Bear" : "1/3", stage2 ? c_ok : stage4 ? c_no : c_na)
+    f_cell(0, 3,  "VCP",               c_na)
+    f_cell(1, 3,  vcp_ok ? "Tight" : "—",   vcp_ok    ? c_ok : c_na)
+    f_cell(0, 4,  "MACD",              c_na)
+    f_cell(1, 4,  macd_bull ? "Bull" : "Bear", macd_bull ? c_ok : c_no)
+    f_cell(0, 5,  "RSI",               c_na)
+    f_cell(1, 5,  str.tostring(math.round(rsi, 1)), rsi_momentum ? c_ok : rsi_pullback ? c_na : c_no)
+    f_cell(0, 6,  "Vol Surge",         c_na)
+    f_cell(1, 6,  vol_surge ? "Yes" : "No", vol_surge ? c_ok : c_na)
+    f_cell(0, 7,  "Brk & Bounce",      c_na)
+    f_cell(1, 7,  entry_bb ? "⚡ " + bb_level : "—", entry_bb ? c_bb : c_na)
+    f_cell(0, 8,  "Touch & Turn",      c_na)
+    f_cell(1, 8,  entry_tt ? "⚡ " + tt_level : "—", entry_tt ? c_tt : c_na)
+    f_cell(0, 9,  "Stop",              c_na)
+    f_cell(1, 9,  str.tostring(math.round(close - atr * atr_sl, 2)), c_na)
+    f_cell(0, 10, "Target",            c_na)
+    f_cell(1, 10, str.tostring(math.round(close + atr * atr_tp, 2)), c_na)
+    f_cell(0, 11, "Open P&L",          c_na)
+    f_cell(1, 11, str.tostring(math.round(strategy.openprofit, 0)),
+           strategy.openprofit >= 0 ? c_ok : c_no)
+
+// ── Alerts ────────────────────────────────────────────────────────────────────
+alertcondition(entry_mom,    "Momentum Entry",   "QQQ: Momentum entry")
+alertcondition(entry_darvas, "Darvas Breakout",  "QQQ: Darvas box breakout")
+alertcondition(entry_vcp,    "VCP Entry",        "QQQ: VCP setup triggered")
+alertcondition(entry_pullbk, "Pullback Add",     "QQQ: Pullback re-entry")
+alertcondition(entry_bb,     "Break & Bounce",   "QQQ: Break & Bounce — " + bb_level)
+alertcondition(entry_tt,     "Touch & Turn",     "QQQ: Touch & Turn — " + tt_level)
+alertcondition(exit_hard,    "Hard Exit",        "QQQ: Exit — EMA50 break or Stage 4")
