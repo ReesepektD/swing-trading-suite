@@ -1,0 +1,10 @@
+yfinance>=0.2.40
+pytrends>=4.9.2
+pandas>=2.0.0
+numpy>=1.24.0
+vaderSentiment>=3.3.2
+praw>=7.7.1
+matplotlib>=3.7.0
+
+# Bot dependencies
+alpaca-py>=0.20.0
