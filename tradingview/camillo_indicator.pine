@@ -1,0 +1,238 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// at https://mozilla.org/MPL/2.0/
+// © Camillo Social Arbitrage Signal — Pine Script v5
+
+//@version=5
+indicator(
+     title       = "Camillo Social Arbitrage Signal",
+     shorttitle  = "CSAS",
+     overlay     = false,
+     max_labels_count = 500,
+     max_lines_count  = 10
+ )
+
+// ─────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────
+grp_thresholds = "Score Thresholds"
+buy_thresh  = input.int(70, "BUY Threshold",   minval = 1, maxval = 100, group = grp_thresholds)
+watch_thresh = input.int(50, "WATCH Threshold", minval = 1, maxval = 99,  group = grp_thresholds)
+
+grp_display = "Display"
+show_factors   = input.bool(true,  "Show Individual Factor Lines",    group = grp_display)
+show_signals   = input.bool(true,  "Show BUY / PASS Arrows on Chart", group = grp_display)
+show_score_lbl = input.bool(true,  "Show Score Label on Latest Bar",   group = grp_display)
+show_table     = input.bool(true,  "Show Factor Table",                group = grp_display)
+
+grp_lookbacks = "Lookback Periods"
+lb_long  = input.int(90, "Long  Volume SMA (Trend Velocity)",  minval = 10, group = grp_lookbacks)
+lb_short = input.int(20, "Short Volume SMA (Reddit Buzz)",     minval = 5,  group = grp_lookbacks)
+lb_rsi   = input.int(14, "RSI Period (Analyst Gap)",           minval = 2,  group = grp_lookbacks)
+lb_reg_v = input.int(90, "LinReg Period — Volume Slope",       minval = 10, group = grp_lookbacks)
+lb_reg_p = input.int(20, "LinReg Period — Price Slope",        minval = 5,  group = grp_lookbacks)
+
+// ─────────────────────────────────────────────
+// HELPER — clamp to [0, 100]
+// ─────────────────────────────────────────────
+clamp(v) =>
+    math.max(0.0, math.min(100.0, v))
+
+// ─────────────────────────────────────────────
+// FACTOR 1 — TREND VELOCITY PROXY (weight 30%)
+// Rate-of-change of volume vs 90-day SMA.
+// Rising volume well above average → trend building.
+// ─────────────────────────────────────────────
+vol_sma_long  = ta.sma(volume, lb_long)
+vol_roc_raw   = (volume / vol_sma_long - 1.0) * 100.0
+f1_trend_vel  = clamp(vol_roc_raw)
+
+// ─────────────────────────────────────────────
+// FACTOR 2 — ANALYST GAP PROXY (weight 25%)
+// Price > 20-day SMA but RSI < 65 → not yet crowded/covered.
+// Score = 100 − RSI(14), clamped 0-100.
+// ─────────────────────────────────────────────
+sma_20        = ta.sma(close, 20)
+rsi_14        = ta.rsi(close, lb_rsi)
+// Only award points when price is above its 20-day SMA (uptrend context)
+f2_analyst_gap = close > sma_20 ? clamp(100.0 - rsi_14) : 0.0
+
+// ─────────────────────────────────────────────
+// FACTOR 3 — REDDIT BUZZ PROXY (weight 25%)
+// Unusual volume spike vs 20-day average.
+// ─────────────────────────────────────────────
+vol_sma_short = ta.sma(volume, lb_short)
+buzz_raw      = (volume / vol_sma_short - 1.0) * 50.0
+f3_buzz       = clamp(buzz_raw)
+
+// ─────────────────────────────────────────────
+// FACTOR 4 — PRICE LAG / MOMENTUM GAP (weight 20%)
+// Volume slope outpacing price slope → price hasn't caught up yet.
+// ─────────────────────────────────────────────
+// Pine's linreg(source, length, offset) returns the value of the regression line
+// at 'offset' bars back. The slope per bar = linreg at 0 minus linreg at 1.
+vol_slope   = ta.linreg(volume, lb_reg_v, 0) - ta.linreg(volume, lb_reg_v, 1)
+price_slope = ta.linreg(close,  lb_reg_p, 0) - ta.linreg(close,  lb_reg_p, 1)
+
+// Normalise volume slope to price-slope units is tricky across tickers,
+// so we scale by a 500× factor (user-tunable via the multiplier below).
+// The intent: if volume momentum is accelerating faster than price, score is high.
+lag_multiplier = 500.0
+lag_raw        = (vol_slope - price_slope) * lag_multiplier
+f4_price_lag   = clamp(lag_raw)
+
+// ─────────────────────────────────────────────
+// COMPOSITE SCORE
+// ─────────────────────────────────────────────
+composite = f1_trend_vel * 0.30 +
+            f2_analyst_gap * 0.25 +
+            f3_buzz * 0.25 +
+            f4_price_lag * 0.20
+
+// ─────────────────────────────────────────────
+// ZONE CLASSIFICATION
+// ─────────────────────────────────────────────
+is_buy   = composite >= buy_thresh
+is_watch = composite >= watch_thresh and composite < buy_thresh
+is_pass  = composite < watch_thresh
+
+// ─────────────────────────────────────────────
+// BACKGROUND COLOR
+// ─────────────────────────────────────────────
+bgcolor(
+     is_buy   ? color.new(color.green,  88) :
+     is_watch ? color.new(color.yellow, 88) :
+                color.new(color.gray,   90),
+     title = "Zone Background"
+ )
+
+// ─────────────────────────────────────────────
+// REFERENCE LINES
+// ─────────────────────────────────────────────
+hline(buy_thresh,   "BUY Threshold",   color = color.new(color.green,  20), linestyle = hline.style_dashed, linewidth = 2)
+hline(watch_thresh, "WATCH Threshold", color = color.new(color.yellow, 20), linestyle = hline.style_dashed, linewidth = 2)
+hline(0,  "Zero",    color = color.new(color.gray, 50), linestyle = hline.style_dotted)
+hline(100, "Ceiling", color = color.new(color.gray, 50), linestyle = hline.style_dotted)
+
+// ─────────────────────────────────────────────
+// INDIVIDUAL FACTOR PLOTS
+// ─────────────────────────────────────────────
+plot(show_factors ? f1_trend_vel  : na, title = "F1 Trend Velocity",  color = color.new(color.blue,   55), linewidth = 1, style = plot.style_line)
+plot(show_factors ? f2_analyst_gap : na, title = "F2 Analyst Gap",    color = color.new(color.orange, 55), linewidth = 1, style = plot.style_line)
+plot(show_factors ? f3_buzz        : na, title = "F3 Reddit Buzz",    color = color.new(color.purple, 55), linewidth = 1, style = plot.style_line)
+plot(show_factors ? f4_price_lag   : na, title = "F4 Price Lag",      color = color.new(color.teal,   55), linewidth = 1, style = plot.style_line)
+
+// ─────────────────────────────────────────────
+// COMPOSITE SCORE LINE (main, thick)
+// ─────────────────────────────────────────────
+comp_color = is_buy   ? color.new(color.green,  0) :
+             is_watch ? color.new(color.yellow, 0) :
+                        color.new(color.gray,   30)
+
+plot(composite, title = "Composite Score", color = comp_color, linewidth = 3, style = plot.style_line)
+
+// ─────────────────────────────────────────────
+// LATEST-BAR SCORE LABEL
+// ─────────────────────────────────────────────
+if show_score_lbl and barstate.islast
+    lbl_text  = (is_buy   ? "BUY"   :
+                 is_watch ? "WATCH" : "PASS") +
+                " | Score: " + str.tostring(math.round(composite, 1))
+    lbl_color = is_buy   ? color.green  :
+                is_watch ? color.yellow : color.gray
+    label.new(
+         bar_index, composite,
+         text       = lbl_text,
+         style      = label.style_label_left,
+         color      = color.new(lbl_color, 10),
+         textcolor  = color.white,
+         size       = size.normal
+     )
+
+// ─────────────────────────────────────────────
+// SIGNAL DETECTION — crossover / crossunder
+// ─────────────────────────────────────────────
+cross_buy  = ta.crossover(composite,  buy_thresh)   // score just crossed above BUY threshold
+cross_pass = ta.crossunder(composite, watch_thresh)  // score just dropped below WATCH threshold
+
+// ─────────────────────────────────────────────
+// BUY / PASS ARROWS ON THE MAIN PRICE CHART
+// These use overlay = false so plotshape draws them in THIS pane.
+// The 'location' parameter places them relative to the composite line.
+// ─────────────────────────────────────────────
+plotshape(
+     show_signals and cross_buy  ? composite : na,
+     title    = "BUY Signal",
+     style    = shape.triangleup,
+     location = location.absolute,
+     color    = color.new(color.green, 0),
+     size     = size.normal,
+     text     = "BUY",
+     textcolor = color.white
+ )
+
+plotshape(
+     show_signals and cross_pass ? composite : na,
+     title    = "PASS Signal",
+     style    = shape.triangledown,
+     location = location.absolute,
+     color    = color.new(color.red, 0),
+     size     = size.normal,
+     text     = "PASS",
+     textcolor = color.white
+ )
+
+// ─────────────────────────────────────────────
+// FACTOR TABLE (top-right corner)
+// ─────────────────────────────────────────────
+if show_table and barstate.islast
+    tbl = table.new(
+         position   = position.top_right,
+         columns    = 3,
+         rows       = 7,
+         bgcolor    = color.new(color.black, 15),
+         border_width = 1,
+         border_color = color.new(color.gray, 40),
+         frame_width  = 2,
+         frame_color  = color.new(color.gray, 20)
+     )
+
+    // Header row
+    header_bg = color.new(color.navy, 10)
+    table.cell(tbl, 0, 0, "CAMILLO FACTOR",  text_color = color.white, bgcolor = header_bg, text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, 0, "SCORE",           text_color = color.white, bgcolor = header_bg, text_size = size.small, text_halign = text.align_center)
+    table.cell(tbl, 2, 0, "WEIGHT",          text_color = color.white, bgcolor = header_bg, text_size = size.small, text_halign = text.align_center)
+
+    // Helper to pick cell color based on score
+    cell_color(score) =>
+        score >= 70 ? color.new(color.green,  50) :
+        score >= 50 ? color.new(color.yellow, 60) :
+                      color.new(color.gray,   60)
+
+    // Factor rows
+    f_names   = array.from("Trend Velocity", "Analyst Gap", "Reddit Buzz", "Price Lag")
+    f_scores  = array.from(f1_trend_vel, f2_analyst_gap, f3_buzz, f4_price_lag)
+    f_weights = array.from("30%", "25%", "25%", "20%")
+
+    for i = 0 to 3
+        row      = i + 1
+        sc       = array.get(f_scores, i)
+        sc_str   = str.tostring(math.round(sc, 1))
+        bg_c     = cell_color(sc)
+        table.cell(tbl, 0, row, array.get(f_names,   i), text_color = color.white, bgcolor = color.new(color.black, 30), text_size = size.small, text_halign = text.align_left)
+        table.cell(tbl, 1, row, sc_str,                  text_color = color.white, bgcolor = bg_c,                       text_size = size.small, text_halign = text.align_center)
+        table.cell(tbl, 2, row, array.get(f_weights, i), text_color = color.white, bgcolor = color.new(color.black, 30), text_size = size.small, text_halign = text.align_center)
+
+    // Divider + composite row
+    table.cell(tbl, 0, 5, "─────────────", text_color = color.new(color.gray, 30), bgcolor = color.new(color.black, 60), text_size = size.tiny, text_halign = text.align_left)
+    table.cell(tbl, 1, 5, "",              text_color = color.white,               bgcolor = color.new(color.black, 60), text_size = size.tiny)
+    table.cell(tbl, 2, 5, "",              text_color = color.white,               bgcolor = color.new(color.black, 60), text_size = size.tiny)
+
+    comp_bg   = is_buy   ? color.new(color.green,  20) :
+                is_watch ? color.new(color.yellow, 30) :
+                           color.new(color.gray,   40)
+    comp_str  = str.tostring(math.round(composite, 1))
+    signal_str = is_buy ? "► BUY" : is_watch ? "● WATCH" : "✕ PASS"
+
+    table.cell(tbl, 0, 6, "COMPOSITE",  text_color = color.white, bgcolor = comp_bg, text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, 6, comp_str,     text_color = color.white, bgcolor = comp_bg, text_size = size.small, text_halign = text.align_center)
+    table.cell(tbl, 2, 6, signal_str,   text_color = color.white, bgcolor = comp_bg, text_size = size.small, text_halign = text.align_center)

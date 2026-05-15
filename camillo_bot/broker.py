@@ -239,11 +239,8 @@ class DryRunBroker(BaseBroker):
         return self._positions.get(ticker)
 
     def get_price(self, ticker: str) -> float:
-        import yfinance as yf
-        hist = yf.Ticker(ticker).history(period="1d")
-        if hist.empty:
-            raise ValueError(f"No price data for {ticker}")
-        return float(hist["Close"].iloc[-1])
+        from camillo_bot.yahoo_data import get_client
+        return get_client().get_price(ticker)
 
     def place_buy(self, ticker: str, notional: float) -> Order:
         price  = self.get_price(ticker)
