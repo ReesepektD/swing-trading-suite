@@ -26,6 +26,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import pytz
 import yfinance as yf
 
 # ── Optional: Alpaca execution ────────────────────────────────────────────────
@@ -646,6 +647,124 @@ def _vix_rule(vix: float) -> str:
     return "✅  VIX < 20 — Full position sizes allowed."
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PRE-MARKET SCANNER
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Nasdaq-100 + high-cap S&P watchlist (covers the QQQ heat map universe)
+_WATCHLIST = [
+    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","AVGO","COST","NFLX",
+    "AMD","QCOM","INTC","INTU","ADBE","TXN","AMAT","MU","KLAC","LRCX",
+    "MRVL","ON","SMCI","ARM","CRWD","PANW","SNPS","CDNS","FTNT","TEAM",
+    "ORCL","CRM","NOW","WDAY","ZS","DDOG","MDB","SNOW","NET","OKTA",
+    "SHOP","MELI","PDD","JD","BIDU","BABA","TSM","ASML","SAP","ERIC",
+    "COIN","HOOD","SOFI","PYPL","V","MA","AXP","JPM","GS","MS",
+    "UBER","LYFT","ABNB","DASH","RBLX","SPOT","SNAP","PINS","RDDT","APP",
+    "LLY","UNH","ABBV","JNJ","MRK","PFE","BMY","GILD","AMGN","REGN",
+    "XOM","CVX","COP","OXY","SLB","HAL","MPC","VLO","PSX","EOG",
+    "SPY","QQQ","IWM","GLD","SLV","TLT","USO","UNG","ARKK","SOXS",
+]
+
+@dataclass
+class PreMarketMover:
+    ticker:     str
+    price:      float
+    prev_close: float
+    pct_chg:    float
+    pm_volume:  int
+    direction:  str   # "up" | "down"
+
+    def cls(self) -> str:
+        return "ok" if self.direction == "up" else "no"
+
+
+class PreMarketScanner:
+    """Scan the watchlist for the top 3 pre-market movers by |% change| × volume."""
+
+    def __init__(self, watchlist: list[str] = None, top_n: int = 3):
+        self.watchlist = watchlist or _WATCHLIST
+        self.top_n     = top_n
+
+    def scan(self) -> list[PreMarketMover]:
+        log.info(f"Pre-market scan: {len(self.watchlist)} tickers...")
+        results: list[PreMarketMover] = []
+
+        try:
+            # Download 5-day 1-minute bars with pre/post market included
+            raw = yf.download(
+                tickers    = " ".join(self.watchlist),
+                period     = "5d",
+                interval   = "1m",
+                prepost    = True,
+                progress   = False,
+                auto_adjust= True,
+                group_by   = "ticker",
+            )
+        except Exception as e:
+            log.warning(f"Pre-market scan failed: {e}")
+            return []
+
+        now_et = datetime.now(pytz.timezone("America/New_York"))
+        today  = now_et.date()
+
+        for ticker in self.watchlist:
+            try:
+                # Extract this ticker's slice
+                if isinstance(raw.columns, pd.MultiIndex):
+                    df = raw[ticker].dropna(how="all")
+                else:
+                    df = raw.dropna(how="all")
+
+                if df.empty:
+                    continue
+
+                df.index = pd.to_datetime(df.index).tz_convert("America/New_York")
+
+                # Previous regular-session close (last 4pm bar)
+                prev = df[
+                    (df.index.date < today) &
+                    (df.index.hour >= 9) & (df.index.hour < 16)
+                ]
+                if prev.empty:
+                    continue
+                prev_close = float(prev["Close"].dropna().iloc[-1])
+
+                # Today's pre-market bars (4:00–9:30 AM ET)
+                pm = df[
+                    (df.index.date == today) &
+                    (df.index.hour >= 4) &
+                    ~((df.index.hour == 9) & (df.index.minute >= 30))
+                ]
+                if pm.empty:
+                    continue
+
+                pm_price  = float(pm["Close"].dropna().iloc[-1])
+                pm_vol    = int(pm["Volume"].sum())
+                pct       = ((pm_price - prev_close) / prev_close) * 100
+
+                results.append(PreMarketMover(
+                    ticker     = ticker,
+                    price      = pm_price,
+                    prev_close = prev_close,
+                    pct_chg    = pct,
+                    pm_volume  = pm_vol,
+                    direction  = "up" if pct >= 0 else "down",
+                ))
+            except Exception:
+                continue
+
+        if not results:
+            log.info("  No pre-market data found (market may not have opened yet).")
+            return []
+
+        # Score = |% change| × log(volume+1) — rewards big movers with real volume
+        results.sort(key=lambda m: abs(m.pct_chg) * (1 + (m.pm_volume ** 0.5)), reverse=True)
+        top = results[:self.top_n]
+        for m in top:
+            log.info(f"  {m.ticker:6s}  {m.pct_chg:+.2f}%  vol={m.pm_volume:,}")
+        return top
+
+
 class ReportBuilder:
     def __init__(self, cfg: Config):
         self.cfg     = cfg
@@ -657,6 +776,7 @@ class ReportBuilder:
         self.prev    = self.ind.df.iloc[-2]
         self.vix     = float(self.vix_df["Close"].iloc[-1])
         self.date    = self.df.index[-1].strftime("%A, %B %d %Y")
+        self.scanner = PreMarketScanner()
 
     # ── shared snapshot rows ──────────────────────────────────────────────────
     def _snapshot_rows(self) -> str:
@@ -694,6 +814,7 @@ class ReportBuilder:
         signals = self.strat.all_signals()
         exit_s  = self.strat.exit_signal()
 
+        # Signals block
         sig_html = ""
         if exit_s:
             sig_html += f'<div class="exit">🚨 <b>EXIT SIGNAL</b> — {exit_s.reason}</div>'
@@ -701,6 +822,33 @@ class ReportBuilder:
             sig_html += f'<div class="sig">⚡ <b>{s.strategy}</b> — {s.reason}<br><small>Stop ${s.stop:.2f} · Target ${s.target:.2f} · R:R {s.rr()}</small></div>'
         if not sig_html:
             sig_html = '<div class="rule">No active entry signals. Stay patient.</div>'
+
+        # Pre-market heat map — top 3 movers
+        movers     = self.scanner.scan()
+        movers_html = ""
+        if movers:
+            rows = ""
+            for m in movers:
+                arrow = "▲" if m.direction == "up" else "▼"
+                rows += f"""
+                <tr>
+                  <td><b>{m.ticker}</b></td>
+                  <td class="{m.cls()}">{arrow} {m.pct_chg:+.2f}%</td>
+                  <td>${m.price:.2f}</td>
+                  <td style="color:#9e9e9e">{m.pm_volume:,}</td>
+                </tr>"""
+            movers_html = f"""
+            <table>
+              <tr>
+                <td style="color:#9e9e9e">Ticker</td>
+                <td style="color:#9e9e9e">PM Chg</td>
+                <td style="color:#9e9e9e">PM Price</td>
+                <td style="color:#9e9e9e">PM Vol</td>
+              </tr>
+              {rows}
+            </table>"""
+        else:
+            movers_html = '<div class="rule">Pre-market data unavailable (market closed or before 4 AM ET).</div>'
 
         html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
         <style>{_CSS}</style></head><body><div class="card">
@@ -711,6 +859,9 @@ class ReportBuilder:
           <tr><td>VIX</td><td class="{_vix_class(self.vix)}">{self.vix:.2f}</td></tr>
         </table>
         <div class="rule">{_vix_rule(self.vix)}</div>
+
+        <h3>🔥 Top 3 Pre-Market Movers</h3>
+        {movers_html}
 
         <h3>QQQ Snapshot</h3>
         <table>{self._snapshot_rows()}</table>
