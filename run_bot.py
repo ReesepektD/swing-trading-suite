@@ -25,7 +25,17 @@ Get free Alpaca paper trading keys at: https://alpaca.markets
 
 import argparse
 import logging
+import os
 import sys
+
+# Load .env from the repo root if present (no external dependency needed)
+_env_path = os.path.join(os.path.dirname(__file__), ".env")
+if os.path.exists(_env_path):
+    for _line in open(_env_path):
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 logging.basicConfig(
     level   = logging.INFO,
