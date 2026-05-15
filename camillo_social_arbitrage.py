@@ -191,12 +191,18 @@ class SocialArbitrageScanner:
         observers but institutional research coverage hasn't caught up yet.
         """
         try:
+            from camillo_bot.yahoo_data import get_client
             stock = yf.Ticker(ticker)
             info  = stock.info
 
             count  = info.get("numberOfAnalystOpinions", 0) or 0
             target = info.get("targetMeanPrice")
-            price  = info.get("currentPrice") or info.get("regularMarketPrice", 0)
+
+            # Use live price from YahooDataClient; fall back to info fields
+            try:
+                price = get_client().get_price(ticker)
+            except Exception:
+                price = float(info.get("currentPrice") or info.get("regularMarketPrice") or 0)
 
             # Fewer analysts → higher gap score
             if   count == 0:  coverage_score = 100
@@ -216,7 +222,7 @@ class SocialArbitrageScanner:
             meta  = {
                 "analyst_count": count,
                 "target_price":  target,
-                "current_price": price,
+                "current_price": round(price, 4),
                 "upside_pct":    round(upside, 1),
             }
             return score, meta
@@ -287,15 +293,30 @@ class SocialArbitrageScanner:
 
         This is the core setup — cultural momentum has built but the stock
         hasn't repriced yet. The gap represents the profit opportunity.
+
+        Uses the live last-trade price (via YahooDataClient) as the final
+        data point so intraday moves are reflected in the score, not just
+        yesterday's close.
         """
         try:
-            stock = yf.Ticker(ticker)
-            hist  = stock.history(period="3mo")
+            from camillo_bot.yahoo_data import get_client
+            ydc  = get_client()
+            hist = ydc.get_history(ticker, period="3mo")
 
             if hist.empty:
                 return 50.0, {}
 
-            prices  = hist["Close"].values.astype(float)
+            prices = hist["Close"].values.astype(float)
+
+            # Replace the last close with the live price so the score
+            # reflects what the market is doing right now.
+            try:
+                live_price = ydc.get_price(ticker)
+                if live_price > 0:
+                    prices[-1] = live_price
+            except Exception:
+                pass  # keep historical close if live fetch fails
+
             px_norm = prices / (prices[0] + 1e-9)
             x       = np.arange(len(px_norm))
             price_slope, _ = np.polyfit(x, px_norm, 1)
@@ -317,6 +338,7 @@ class SocialArbitrageScanner:
                 "price_slope":   round(float(price_slope), 5),
                 "trend_slope":   round(float(trend_slope), 5),
                 "gap":           round(float(gap), 5),
+                "live_price":    round(float(prices[-1]), 4),
             }
             return round(score, 1), meta
 
