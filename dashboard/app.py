@@ -139,17 +139,18 @@ def api_data():
     total_val = sum((p.get("current_price", 0) or 0) * (p.get("qty") or 0) for p in positions)
 
     return jsonify({
-        "positions":   positions,
-        "top3":        top3,
-        "trade_log":   log,
+        "positions":    positions,
+        "top3":         top3,
+        "trade_log":    log,
         "summary": {
             "open_positions": len(positions),
             "max_positions":  12,
             "total_pl":       round(total_pl, 2),
             "total_value":    round(total_val, 2),
         },
-        "rules":       TRADING_RULES,
-        "updated_at":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "rules":        TRADING_RULES,
+        "public_url":   os.environ.get("CAMILLO_DASHBOARD_URL", ""),
+        "updated_at":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     })
 
 
@@ -287,6 +288,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <span class="badge"><span class="live-dot"></span>Live</span>
     <span class="updated" id="updated-at">Loading…</span>
   </div>
+</div>
+<div id="public-bar" style="display:none;background:#1e3a5f;border-bottom:1px solid #2d5a8e;padding:8px 32px;font-size:0.78rem;color:#93c5fd;align-items:center;gap:10px;">
+  <span>&#128279; Public link:</span>
+  <a id="public-url-link" href="#" target="_blank" style="color:#60a5fa;font-weight:600;text-decoration:none;"></a>
+  <span style="color:#4b7ab8;margin-left:4px;">(share this URL to view dashboard remotely)</span>
 </div>
 
 <div class="main">
@@ -593,6 +599,16 @@ async function refresh() {
 
     document.getElementById('updated-at').textContent = 'Updated ' + data.updated_at;
 
+    const bar  = document.getElementById('public-bar');
+    const link = document.getElementById('public-url-link');
+    if (data.public_url) {
+      bar.style.display = 'flex';
+      link.href        = data.public_url;
+      link.textContent = data.public_url;
+    } else {
+      bar.style.display = 'none';
+    }
+
     renderSummary(data.summary);
     renderTop3(data.top3);
     renderFactorChart(data.rules.factors);
@@ -618,11 +634,60 @@ def index():
     return render_template_string(DASHBOARD_HTML)
 
 
+def start_ngrok(port: int) -> str:
+    """Start an ngrok tunnel and return the public HTTPS URL (or empty string on failure)."""
+    import subprocess, shutil, time as _time, urllib.request
+
+    ngrok_bin = shutil.which("ngrok") or os.path.expanduser("~/bin/ngrok")
+    if not os.path.exists(ngrok_bin):
+        print("  ✗ ngrok not found — run without --public or install ngrok")
+        return ""
+
+    proc = subprocess.Popen(
+        [ngrok_bin, "http", str(port), "--log=stdout"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+
+    # Poll ngrok's local API until the tunnel URL appears
+    for _ in range(20):
+        _time.sleep(0.5)
+        try:
+            with urllib.request.urlopen("http://localhost:4040/api/tunnels", timeout=1) as r:
+                data = json.loads(r.read())
+            for t in data.get("tunnels", []):
+                if t.get("proto") == "https":
+                    return t["public_url"]
+        except Exception:
+            pass
+
+    proc.terminate()
+    print("  ✗ ngrok tunnel did not start in time")
+    return ""
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=5050)
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port",   type=int, default=5050)
+    parser.add_argument("--host",   default="127.0.0.1")
+    parser.add_argument("--public", action="store_true",
+                        help="Expose dashboard publicly via ngrok and set CAMILLO_DASHBOARD_URL")
     args = parser.parse_args()
-    print(f"\n  Camillo Dashboard → http://{args.host}:{args.port}\n")
+
+    public_url = ""
+    if args.public:
+        print("  Starting ngrok tunnel…")
+        public_url = start_ngrok(args.port)
+        if public_url:
+            os.environ["CAMILLO_DASHBOARD_URL"] = public_url
+            print(f"  ✓ Public URL  → {public_url}")
+            print(f"  ✓ Emails will include a 'View Live Dashboard' button")
+
+    local_url = f"http://{args.host}:{args.port}"
+    print(f"\n  Camillo Dashboard → {local_url}")
+    if public_url:
+        print(f"  Public link    → {public_url}\n")
+    else:
+        print()
+
     app.run(host=args.host, port=args.port, debug=False)
