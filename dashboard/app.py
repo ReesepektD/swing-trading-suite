@@ -273,137 +273,220 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 0 rgba(34,197,94,0.4); animation: pulse 2s infinite; margin-right: 6px; }
   @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.4); } 50% { box-shadow: 0 0 0 6px rgba(34,197,94,0); } }
 
+  /* ── Bottom nav (mobile only) ── */
+  .bottom-nav { display: none; position: fixed; bottom: 0; left: 0; right: 0; background: var(--surface); border-top: 1px solid var(--border); z-index: 100; padding: 0; safe-area-inset-bottom: env(safe-area-inset-bottom); }
+  .bottom-nav-inner { display: flex; justify-content: space-around; padding: 6px 0 calc(6px + env(safe-area-inset-bottom, 0px)); }
+  .nav-btn { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 6px 4px; border: none; background: none; color: var(--muted); cursor: pointer; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.05em; -webkit-tap-highlight-color: transparent; transition: color 0.15s; }
+  .nav-btn svg { width: 22px; height: 22px; stroke-width: 1.8; }
+  .nav-btn.active { color: var(--blue); }
+
+  /* ── Table scroll containers ── */
+  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  /* ── Tablet ── */
   @media (max-width: 900px) {
     .summary-bar { grid-template-columns: 1fr 1fr; }
     .grid-2      { grid-template-columns: 1fr; }
     .grid-3      { grid-template-columns: 1fr; }
+  }
+
+  /* ── Mobile ── */
+  @media (max-width: 600px) {
+    .header { padding: 12px 16px; }
+    .header h1 { font-size: 1rem; }
+    .header h1 .subtitle { display: none; }
+    .updated { display: none; }
+
+    #public-bar { padding: 8px 16px; font-size: 0.72rem; flex-wrap: wrap; gap: 4px; }
+
+    .main { padding: 12px 12px 80px; gap: 14px; }
+
+    .summary-bar { grid-template-columns: 1fr 1fr; gap: 10px; }
+    .stat-card { padding: 14px 12px; border-radius: 10px; }
+    .stat-card .value { font-size: 1.35rem; }
+    .stat-card .sub { font-size: 0.65rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .card-header { padding: 12px 14px; }
+    .card-body { padding: 12px; }
+
+    .pos-card { padding: 12px; }
+    .pos-ticker { font-size: 1.2rem; }
+    .pos-prices { flex-wrap: wrap; gap: 10px; }
+    .pos-price-block { min-width: 70px; }
+
+    .chart-wrap { height: 180px; }
+
+    .threshold-row { gap: 8px; }
+    .threshold-pill { padding: 10px 6px; }
+    .threshold-pill .t-label { font-size: 0.85rem; }
+    .threshold-pill .t-action { display: none; }
+
+    .sizing-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+    .sizing-item { padding: 10px; }
+    .sizing-item .s-val { font-size: 1rem; }
+
+    .rules-table td, .rules-table th { padding: 8px 8px; font-size: 0.72rem; }
+    .rules-table th:nth-child(4), .rules-table td:nth-child(4) { display: none; }
+
+    .schedule-item { gap: 10px; }
+    .schedule-time { min-width: 68px; font-size: 0.7rem; }
+    .schedule-action { font-size: 0.75rem; }
+
+    .log-row { flex-wrap: wrap; gap: 6px; }
+    .log-reason, .log-ts { font-size: 0.65rem; }
+
+    .empty-state { padding: 20px; font-size: 0.8rem; }
+
+    .bottom-nav { display: block; }
+
+    /* hide sections when not active on mobile */
+    .section { display: none; }
+    .section.active { display: block; }
+    .summary-bar { display: grid !important; }
   }
 </style>
 </head>
 <body>
 
 <div class="header">
-  <h1>Camillo <span>Social Arbitrage</span> Dashboard</h1>
-  <div style="display:flex;align-items:center;gap:12px;">
+  <h1>Camillo <span class="subtitle">Social Arbitrage</span> Dashboard</h1>
+  <div style="display:flex;align-items:center;gap:10px;">
     <span class="badge"><span class="live-dot"></span>Live</span>
     <span class="updated" id="updated-at">Loading…</span>
   </div>
 </div>
 <div id="public-bar" style="display:none;background:#1e3a5f;border-bottom:1px solid #2d5a8e;padding:8px 32px;font-size:0.78rem;color:#93c5fd;align-items:center;gap:10px;">
-  <span>&#128279; Public link:</span>
-  <a id="public-url-link" href="#" target="_blank" style="color:#60a5fa;font-weight:600;text-decoration:none;"></a>
-  <span style="color:#4b7ab8;margin-left:4px;">(share this URL to view dashboard remotely)</span>
+  <span>&#128279;</span>
+  <a id="public-url-link" href="#" target="_blank" style="color:#60a5fa;font-weight:600;text-decoration:none;word-break:break-all;"></a>
 </div>
 
 <div class="main">
 
-  <!-- Summary bar -->
+  <!-- Always-visible summary bar -->
   <div class="summary-bar">
     <div class="stat-card">
-      <div class="label">Open Positions</div>
+      <div class="label">Positions</div>
       <div class="value" id="open-pos">—</div>
       <div class="sub" id="pos-sub">of 12 max</div>
     </div>
     <div class="stat-card">
-      <div class="label">Total Market Value</div>
+      <div class="label">Market Value</div>
       <div class="value" id="total-val">—</div>
       <div class="sub">open positions</div>
     </div>
     <div class="stat-card">
       <div class="label">Unrealized P&L</div>
       <div class="value" id="total-pl">—</div>
-      <div class="sub">across all positions</div>
+      <div class="sub">all positions</div>
     </div>
     <div class="stat-card">
       <div class="label">Watchlist</div>
       <div class="value green">6</div>
-      <div class="sub">CELH, ONON, BIRK, DUOL, CAVA, BROS</div>
+      <div class="sub">CELH ONON BIRK DUOL CAVA BROS</div>
     </div>
   </div>
 
-  <!-- Top 3 positions + factor chart -->
-  <div class="grid-2">
+  <!-- SECTION: Positions -->
+  <div id="section-positions" class="section active">
 
-    <div class="card">
-      <div class="card-header">
-        <h2>Top 3 Positions</h2>
-        <span class="badge" style="font-size:0.65rem;">by unrealized gain</span>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header">
+          <h2>Top 3 Positions</h2>
+          <span class="badge" style="font-size:0.65rem;">by unrealized gain</span>
+        </div>
+        <div class="card-body">
+          <div id="top3-container">
+            <div class="empty-state">No open positions yet.<br><code style="font-size:0.75rem;">python3 run_bot.py --mode paper --scan-now</code></div>
+          </div>
+        </div>
       </div>
-      <div class="card-body">
-        <div id="top3-container">
-          <div class="empty-state">No open positions yet.<br>Run <code>python3 run_bot.py --mode paper --scan-now</code> to enter positions.</div>
+
+      <div class="card">
+        <div class="card-header"><h2>4-Factor Scoring Weights</h2></div>
+        <div class="card-body">
+          <div class="chart-wrap">
+            <canvas id="factorChart"></canvas>
+          </div>
+          <div style="margin-top:16px;display:flex;flex-direction:column;gap:8px;" id="factor-legend"></div>
         </div>
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-header"><h2>4-Factor Scoring Weights</h2></div>
-      <div class="card-body">
-        <div class="chart-wrap">
-          <canvas id="factorChart"></canvas>
+  </div>
+
+  <!-- SECTION: Rules -->
+  <div id="section-rules" class="section">
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header"><h2>Entry Thresholds</h2></div>
+        <div class="card-body">
+          <div class="threshold-row" id="thresholds"></div>
+          <div style="margin-bottom:12px;font-size:0.75rem;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:0.06em;">Position Sizing</div>
+          <div class="sizing-grid" id="sizing-grid"></div>
+          <div class="sizing-note" id="sizing-note"></div>
+          <div class="halt-banner" id="halt-banner" style="display:none;"></div>
         </div>
-        <div style="margin-top:16px;display:flex;flex-direction:column;gap:8px;" id="factor-legend"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>Exit Rules</h2>
+          <span class="badge" style="font-size:0.65rem;">priority order</span>
+        </div>
+        <div class="table-scroll" style="padding:0;">
+          <table class="rules-table">
+            <thead><tr><th>#</th><th>Rule</th><th>Trigger</th><th>Action</th></tr></thead>
+            <tbody id="risk-rows"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
   </div>
 
-  <!-- Entry thresholds + risk rules -->
-  <div class="grid-2">
+  <!-- SECTION: Schedule + Log -->
+  <div id="section-log" class="section">
 
-    <div class="card">
-      <div class="card-header"><h2>Entry Thresholds</h2></div>
-      <div class="card-body">
-        <div class="threshold-row" id="thresholds"></div>
-
-        <div style="margin-bottom:12px;font-size:0.75rem;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:0.06em;">Position Sizing</div>
-        <div class="sizing-grid" id="sizing-grid"></div>
-        <div class="sizing-note" id="sizing-note"></div>
-
-        <div class="halt-banner" id="halt-banner" style="display:none;"></div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header"><h2>Scan Schedule</h2></div>
+        <div class="card-body" id="schedule-body"></div>
       </div>
-    </div>
 
-    <div class="card">
-      <div class="card-header">
-        <h2>Exit Rules</h2>
-        <span class="badge" style="font-size:0.65rem;">priority order</span>
-      </div>
-      <div class="card-body" style="padding:0;">
-        <table class="rules-table">
-          <thead>
-            <tr>
-              <th>#</th><th>Rule</th><th>Trigger</th><th>Action</th>
-            </tr>
-          </thead>
-          <tbody id="risk-rows"></tbody>
-        </table>
-      </div>
-    </div>
-
-  </div>
-
-  <!-- Schedule + trade log -->
-  <div class="grid-2">
-
-    <div class="card">
-      <div class="card-header"><h2>Scan Schedule</h2></div>
-      <div class="card-body" id="schedule-body"></div>
-    </div>
-
-    <div class="card">
-      <div class="card-header">
-        <h2>Recent Trades</h2>
-        <span class="badge" id="log-count" style="font-size:0.65rem;">0 trades</span>
-      </div>
-      <div class="card-body" id="log-body">
-        <div class="empty-state">No trades yet.</div>
+      <div class="card">
+        <div class="card-header">
+          <h2>Recent Trades</h2>
+          <span class="badge" id="log-count" style="font-size:0.65rem;">0 trades</span>
+        </div>
+        <div class="card-body" id="log-body">
+          <div class="empty-state">No trades yet.</div>
+        </div>
       </div>
     </div>
 
   </div>
 
 </div>
+
+<!-- Mobile bottom nav -->
+<nav class="bottom-nav" aria-label="Dashboard navigation">
+  <div class="bottom-nav-inner">
+    <button class="nav-btn active" onclick="showSection('positions',this)" aria-label="Positions">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 3h18v18H3zM3 9h18M9 21V9"/></svg>
+      Positions
+    </button>
+    <button class="nav-btn" onclick="showSection('rules',this)" aria-label="Rules">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+      Rules
+    </button>
+    <button class="nav-btn" onclick="showSection('log',this)" aria-label="Activity">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+      Activity
+    </button>
+  </div>
+</nav>
 
 <script>
 let factorChart = null;
@@ -621,6 +704,23 @@ async function refresh() {
     console.error('Refresh failed:', e);
   }
 }
+
+function showSection(name, btn) {
+  // Only applies on mobile (≤600px) — on desktop all sections are always visible
+  if (window.innerWidth > 600) return;
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.getElementById('section-' + name).classList.add('active');
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// On resize to desktop, make all sections visible again
+window.addEventListener('resize', () => {
+  if (window.innerWidth > 600) {
+    document.querySelectorAll('.section').forEach(s => s.style.display = '');
+  }
+});
 
 refresh();
 setInterval(refresh, 30000);
