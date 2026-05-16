@@ -37,15 +37,17 @@ if os.path.exists(_env_path):
             _k, _v = _line.split("=", 1)
             os.environ.setdefault(_k.strip(), _v.strip())
 
-logging.basicConfig(
-    level   = logging.INFO,
-    format  = "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt = "%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("camillo_bot.log"),
-    ],
-)
+root_logger = logging.getLogger()
+if not root_logger.handlers:
+    root_logger.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                            datefmt="%Y-%m-%d %H:%M:%S")
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    fh = logging.FileHandler("camillo_bot.log")
+    fh.setFormatter(fmt)
+    root_logger.addHandler(sh)
+    root_logger.addHandler(fh)
 log = logging.getLogger("run_bot")
 
 
