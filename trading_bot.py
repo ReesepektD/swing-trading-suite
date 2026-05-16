@@ -757,9 +757,72 @@ class PreMarketScanner:
             log.info("  No pre-market data found (market may not have opened yet).")
             return []
 
-        # Score = |% change| × log(volume+1) — rewards big movers with real volume
-        results.sort(key=lambda m: abs(m.pct_chg) * (1 + (m.pm_volume ** 0.5)), reverse=True)
-        top = results[:self.top_n]
+        return self._rank(results)
+
+    def intraday_scan(self) -> list[PreMarketMover]:
+        """Scan regular-session bars for the top bullish movers so far today."""
+        log.info(f"Intraday scan: {len(self.watchlist)} tickers...")
+        results: list[PreMarketMover] = []
+
+        try:
+            raw = yf.download(
+                tickers    = " ".join(self.watchlist),
+                period     = "2d",
+                interval   = "5m",
+                prepost    = False,
+                progress   = False,
+                auto_adjust= True,
+                group_by   = "ticker",
+            )
+        except Exception as e:
+            log.warning(f"Intraday scan failed: {e}")
+            return []
+
+        now_et = datetime.now(pytz.timezone("America/New_York"))
+        today  = now_et.date()
+
+        for ticker in self.watchlist:
+            try:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    df = raw[ticker].dropna(how="all")
+                else:
+                    df = raw.dropna(how="all")
+                if df.empty:
+                    continue
+
+                df.index = pd.to_datetime(df.index).tz_convert("America/New_York")
+
+                prev = df[df.index.date < today]
+                if prev.empty:
+                    continue
+                prev_close = float(prev["Close"].dropna().iloc[-1])
+
+                today_bars = df[df.index.date == today]
+                if today_bars.empty:
+                    continue
+
+                cur_price = float(today_bars["Close"].dropna().iloc[-1])
+                vol       = int(today_bars["Volume"].sum())
+                pct       = ((cur_price - prev_close) / prev_close) * 100
+
+                results.append(PreMarketMover(
+                    ticker     = ticker,
+                    price      = cur_price,
+                    prev_close = prev_close,
+                    pct_chg    = pct,
+                    pm_volume  = vol,
+                    direction  = "up" if pct >= 0 else "down",
+                ))
+            except Exception:
+                continue
+
+        return self._rank(results)
+
+    def _rank(self, results: list[PreMarketMover]) -> list[PreMarketMover]:
+        """Return top_n bullish movers sorted by % change × √volume."""
+        bullish = [m for m in results if m.direction == "up"]
+        bullish.sort(key=lambda m: m.pct_chg * (1 + m.pm_volume ** 0.5), reverse=True)
+        top = bullish[:self.top_n]
         for m in top:
             log.info(f"  {m.ticker:6s}  {m.pct_chg:+.2f}%  vol={m.pm_volume:,}")
         return top
@@ -777,6 +840,30 @@ class ReportBuilder:
         self.vix     = float(self.vix_df["Close"].iloc[-1])
         self.date    = self.df.index[-1].strftime("%A, %B %d %Y")
         self.scanner = PreMarketScanner()
+
+    # ── shared movers table ───────────────────────────────────────────────────
+    @staticmethod
+    def _movers_table(movers: list[PreMarketMover], vol_label: str = "Volume") -> str:
+        if not movers:
+            return '<div class="rule">No bullish movers found — market may be closed or data unavailable.</div>'
+        rows = ""
+        for m in movers:
+            rows += f"""
+            <tr>
+              <td><b>{m.ticker}</b></td>
+              <td class="ok">▲ {m.pct_chg:+.2f}%</td>
+              <td>${m.price:.2f}</td>
+              <td style="color:#9e9e9e">{m.pm_volume:,}</td>
+            </tr>"""
+        return f"""
+        <table>
+          <tr>
+            <td style="color:#9e9e9e">Ticker</td>
+            <td style="color:#9e9e9e">Chg</td>
+            <td style="color:#9e9e9e">Price</td>
+            <td style="color:#9e9e9e">{vol_label}</td>
+          </tr>{rows}
+        </table>"""
 
     # ── shared snapshot rows ──────────────────────────────────────────────────
     def _snapshot_rows(self) -> str:
@@ -823,32 +910,9 @@ class ReportBuilder:
         if not sig_html:
             sig_html = '<div class="rule">No active entry signals. Stay patient.</div>'
 
-        # Pre-market heat map — top 3 movers
-        movers     = self.scanner.scan()
-        movers_html = ""
-        if movers:
-            rows = ""
-            for m in movers:
-                arrow = "▲" if m.direction == "up" else "▼"
-                rows += f"""
-                <tr>
-                  <td><b>{m.ticker}</b></td>
-                  <td class="{m.cls()}">{arrow} {m.pct_chg:+.2f}%</td>
-                  <td>${m.price:.2f}</td>
-                  <td style="color:#9e9e9e">{m.pm_volume:,}</td>
-                </tr>"""
-            movers_html = f"""
-            <table>
-              <tr>
-                <td style="color:#9e9e9e">Ticker</td>
-                <td style="color:#9e9e9e">PM Chg</td>
-                <td style="color:#9e9e9e">PM Price</td>
-                <td style="color:#9e9e9e">PM Vol</td>
-              </tr>
-              {rows}
-            </table>"""
-        else:
-            movers_html = '<div class="rule">Pre-market data unavailable (market closed or before 4 AM ET).</div>'
+        # Pre-market heat map — top 3 bullish movers
+        movers      = self.scanner.scan()
+        movers_html = self._movers_table(movers, vol_label="PM Vol")
 
         html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
         <style>{_CSS}</style></head><body><div class="card">
@@ -860,7 +924,7 @@ class ReportBuilder:
         </table>
         <div class="rule">{_vix_rule(self.vix)}</div>
 
-        <h3>🔥 Top 3 Pre-Market Movers</h3>
+        <h3>🟢 Top 3 Bullish Pre-Market</h3>
         {movers_html}
 
         <h3>QQQ Snapshot</h3>
@@ -911,6 +975,10 @@ class ReportBuilder:
         dist_day  = intra_chg < 0 and vol_pct >= 150
         dist_warn = '<div class="exit">⚠️ <b>Potential Distribution Day</b> — QQQ down on heavy volume. Add to monthly tally.</div>' if dist_day else ""
 
+        # Intraday bullish movers
+        intra_movers      = self.scanner.intraday_scan()
+        intra_movers_html = self._movers_table(intra_movers, vol_label="Intraday Vol")
+
         html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
         <style>{_CSS}</style></head><body><div class="card">
         <h2>📊 QQQ MID-DAY CHECK — {self.date}</h2>
@@ -925,6 +993,9 @@ class ReportBuilder:
               <td class="{_vix_class(self.vix)}">{self.vix:.2f}</td></tr>
         </table>
         {dist_warn}
+
+        <h3>🟢 Top 3 Bullish Intraday</h3>
+        {intra_movers_html}
 
         <h3>Daily Indicators</h3>
         <table>{self._snapshot_rows()}</table>
