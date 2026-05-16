@@ -17,3 +17,7 @@ env/
 # Secrets — never commit these
 .env
 *.env
+camillo_webhook.log
+qqq_cron.log
+camillo_cron.log
+*.log
