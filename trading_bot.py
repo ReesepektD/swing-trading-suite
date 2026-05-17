@@ -1012,6 +1012,447 @@ class MarketScanner:
         return top
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TRADE EXECUTOR  — morning execution after pre-market scan
+# ─────────────────────────────────────────────────────────────────────────────
+@dataclass
+class TradeRecord:
+    ticker:   str
+    strategy: str
+    qty:      int
+    price:    float
+    stop:     float
+    target:   float
+    tt_score: int
+    stage:    str
+    rr:       float
+    risk_amt: float   # dollar risk for this trade
+
+
+class TradeExecutor:
+    """
+    After the morning scan produces top setups, execute qualifying orders.
+
+    Rules:
+      • Max 3 simultaneous open positions (Alpaca positions count)
+      • Skip non-US tickers (anything with '.' in symbol, e.g. SU.TO)
+      • Require TT ≥ 5 and Stage not 4-Bear
+      • Position sizing: 1.5% portfolio risk per trade, capped at 15% portfolio value
+        qty = floor(min(portfolio * 0.015 / risk_per_share,
+                        portfolio * 0.15  / price))
+      • Minimum qty = 1; skip if risk_per_share ≤ 0
+    """
+
+    MAX_POSITIONS = 3
+    RISK_PCT      = 0.015    # 1.5% of portfolio per trade
+    MAX_SIZE_PCT  = 0.15     # 15% of portfolio per position
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.broker: Optional[AlpacaBroker] = None
+        if ALPACA_AVAILABLE and cfg.alpaca_key:
+            try:
+                self.broker = AlpacaBroker(cfg)
+            except Exception as e:
+                log.warning(f"TradeExecutor: broker unavailable — {e}")
+
+    @staticmethod
+    def _is_us_ticker(symbol: str) -> bool:
+        """Return False for non-US tickers like SU.TO (TSX)."""
+        return "." not in symbol
+
+    def _open_position_count(self) -> int:
+        if not self.broker:
+            return 0
+        try:
+            positions = self.broker.api.list_positions()
+            return len(positions)
+        except Exception:
+            return 0
+
+    def _already_in(self, symbol: str) -> bool:
+        if not self.broker:
+            return False
+        return self.broker.current_position(symbol) > 0
+
+    def _size_order(self, price: float, stop: float, portfolio: float) -> int:
+        risk_per_share = price - stop
+        if risk_per_share <= 0:
+            return 0
+        qty_risk = (portfolio * self.RISK_PCT) / risk_per_share
+        qty_size = (portfolio * self.MAX_SIZE_PCT) / price
+        return max(0, int(min(qty_risk, qty_size)))
+
+    def execute(self, scan_results: list) -> list[TradeRecord]:
+        """
+        Execute orders for qualifying scan results.
+        Returns a list of TradeRecord for each order placed (or attempted in dry-run).
+        """
+        executed: list[TradeRecord] = []
+
+        if not self.broker:
+            log.warning("TradeExecutor: no broker — dry-run only (logging signals).")
+
+        open_count = self._open_position_count()
+        log.info(f"TradeExecutor: {open_count} positions open, max={self.MAX_POSITIONS}")
+
+        portfolio = 100_000.0   # fallback for dry-run
+        if self.broker:
+            try:
+                portfolio = self.broker.portfolio_value()
+            except Exception as e:
+                log.warning(f"  Could not fetch portfolio value: {e}. Using ${portfolio:,.0f}.")
+
+        for result in scan_results:
+            if open_count >= self.MAX_POSITIONS:
+                log.info(f"  Max positions reached ({self.MAX_POSITIONS}). Skipping remaining.")
+                break
+
+            ticker = result.ticker
+
+            # Filter: US only
+            if not self._is_us_ticker(ticker):
+                log.info(f"  {ticker}: non-US ticker — skip.")
+                continue
+
+            # Filter: TT ≥ 5
+            if result.tt_score < 5:
+                log.info(f"  {ticker}: TT={result.tt_score}/7 < 5 — skip.")
+                continue
+
+            # Filter: not Stage 4
+            if result.stage == "4-Bear":
+                log.info(f"  {ticker}: Stage 4 — skip.")
+                continue
+
+            # Filter: already in position
+            if self._already_in(ticker):
+                log.info(f"  {ticker}: already have position — skip.")
+                continue
+
+            # Size order
+            qty = self._size_order(result.price, result.stop, portfolio)
+            if qty < 1:
+                log.info(f"  {ticker}: qty=0 after sizing (price=${result.price:.2f} stop=${result.stop:.2f}) — skip.")
+                continue
+
+            risk_amt  = (result.price - result.stop) * qty
+            sig_name  = result.signal_names()
+
+            log.info(
+                f"  → ORDER: BUY {qty} {ticker} @ ~${result.price:.2f}  "
+                f"SL=${result.stop:.2f}  TP=${result.target:.2f}  "
+                f"risk=${risk_amt:.2f}  [{sig_name}]"
+            )
+
+            if self.broker:
+                try:
+                    self.broker.api.submit_order(
+                        symbol        = ticker,
+                        qty           = qty,
+                        side          = "buy",
+                        type          = "market",
+                        time_in_force = "day",
+                    )
+                    open_count += 1
+                except Exception as e:
+                    log.error(f"  {ticker}: order failed — {e}")
+                    continue
+            else:
+                # Dry-run: count it anyway so we respect max-positions in log
+                open_count += 1
+
+            executed.append(TradeRecord(
+                ticker   = ticker,
+                strategy = sig_name,
+                qty      = qty,
+                price    = result.price,
+                stop     = result.stop,
+                target   = result.target,
+                tt_score = result.tt_score,
+                stage    = result.stage,
+                rr       = result.rr(),
+                risk_amt = risk_amt,
+            ))
+
+        log.info(f"TradeExecutor: {len(executed)} order(s) placed.")
+        return executed
+
+    # ── trade confirmation email ───────────────────────────────────────────────
+    @staticmethod
+    def _trades_html(trades: list[TradeRecord], date_str: str) -> tuple[str, str]:
+        if not trades:
+            rows  = '<tr><td colspan="7" class="neu" style="text-align:center">No qualifying trades today.</td></tr>'
+        else:
+            rows = ""
+            for t in trades:
+                rr_cls = "ok" if t.rr >= 2.5 else "warn" if t.rr >= 1.5 else "no"
+                rows += f"""
+                <tr>
+                  <td><b>{t.ticker}</b></td>
+                  <td>{t.qty}</td>
+                  <td>${t.price:.2f}</td>
+                  <td class="no">${t.stop:.2f}</td>
+                  <td class="ok">${t.target:.2f}</td>
+                  <td class="{rr_cls}">{t.rr}</td>
+                  <td style="color:#9e9e9e;font-size:11px">{t.strategy}</td>
+                </tr>
+                <tr>
+                  <td colspan="3" style="color:#9e9e9e;font-size:11px">
+                    TT {t.tt_score}/7 · {t.stage}
+                  </td>
+                  <td colspan="4" style="color:#9e9e9e;font-size:11px">
+                    Risk ${t.risk_amt:.2f}
+                  </td>
+                </tr>"""
+
+        html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+        <style>{_CSS}</style></head><body><div class="card">
+        <h2>🚀 TRADE EXECUTION REPORT — {date_str}</h2>
+        <p style="color:#9e9e9e;font-size:13px">
+          Orders placed at open based on this morning's market scan.
+          All market orders — actual fill prices may differ slightly.
+        </p>
+        <table>
+          <tr>
+            <td style="color:#9e9e9e">Ticker</td>
+            <td style="color:#9e9e9e">Qty</td>
+            <td style="color:#9e9e9e">Entry</td>
+            <td style="color:#9e9e9e">Stop</td>
+            <td style="color:#9e9e9e">Target</td>
+            <td style="color:#9e9e9e">R:R</td>
+            <td style="color:#9e9e9e">Setup</td>
+          </tr>
+          {rows}
+        </table>
+        <div class="rule" style="margin-top:12px">
+          📋 Next steps:<br>
+          □ Verify fills in Alpaca dashboard<br>
+          □ Set price alerts at stop and target levels<br>
+          □ Bot will monitor positions every 15 min and email if action needed
+        </div>
+        <p class="foot">QQQ Swing Suite · Trade Execution · {datetime.now().strftime('%Y-%m-%d %H:%M ET')}</p>
+        </div></body></html>"""
+
+        n     = len(trades)
+        subj  = f"🚀 Trades Placed: {n} order{'s' if n != 1 else ''} — {date_str}"
+        return subj, html
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POSITION MONITOR  — 15-minute intraday scan of open positions
+# ─────────────────────────────────────────────────────────────────────────────
+@dataclass
+class MonitorAction:
+    ticker:  str
+    action:  str   # "exit" | "trim" | "trail_stop" | "hold"
+    reason:  str
+    price:   float
+    qty:     int
+
+
+class PositionMonitor:
+    """
+    Runs every 15 minutes during market hours.
+
+    For each open Alpaca position:
+      1. Download recent daily data + today's 15-min intraday bar
+      2. Recompute all indicators
+      3. Check exit conditions:
+         - Stop hit: current price ≤ stop (2×ATR)
+         - Exit signal: EMA50 breakdown on volume OR Stage 4
+      4. Check trim condition: current price ≥ target → trim 1/3
+      5. Log and optionally execute + send alert email
+    """
+
+    def __init__(self, cfg: Config):
+        self.cfg    = cfg
+        self.broker: Optional[AlpacaBroker] = None
+        if ALPACA_AVAILABLE and cfg.alpaca_key:
+            try:
+                self.broker = AlpacaBroker(cfg)
+            except Exception as e:
+                log.warning(f"PositionMonitor: broker unavailable — {e}")
+
+    def _current_price(self, symbol: str) -> Optional[float]:
+        """Fetch the most recent 15-min bar price."""
+        try:
+            bars = yf.download(
+                symbol, period="1d", interval="15m",
+                prepost=False, progress=False, auto_adjust=True
+            )
+            if isinstance(bars.columns, pd.MultiIndex):
+                bars.columns = bars.columns.get_level_values(0)
+            bars = bars.dropna(how="all")
+            if bars.empty:
+                return None
+            return float(bars["Close"].iloc[-1])
+        except Exception:
+            return None
+
+    def _trim(self, symbol: str, full_qty: int) -> int:
+        """Sell 1/3 of position (floor). Returns shares sold."""
+        trim_qty = max(1, full_qty // 3)
+        if self.broker:
+            try:
+                self.broker.api.submit_order(
+                    symbol=symbol, qty=trim_qty, side="sell",
+                    type="market", time_in_force="day",
+                )
+                log.info(f"  TRIM: sold {trim_qty} of {full_qty} shares of {symbol}")
+            except Exception as e:
+                log.error(f"  TRIM failed for {symbol}: {e}")
+        return trim_qty
+
+    def _exit(self, symbol: str, qty: int) -> None:
+        if self.broker:
+            try:
+                self.broker.api.submit_order(
+                    symbol=symbol, qty=qty, side="sell",
+                    type="market", time_in_force="day",
+                )
+                log.info(f"  EXIT: sold {qty} shares of {symbol}")
+            except Exception as e:
+                log.error(f"  EXIT failed for {symbol}: {e}")
+
+    def scan(self) -> list[MonitorAction]:
+        actions: list[MonitorAction] = []
+
+        if not self.broker:
+            log.warning("PositionMonitor: no broker — scan aborted.")
+            return actions
+
+        try:
+            positions = self.broker.api.list_positions()
+        except Exception as e:
+            log.error(f"PositionMonitor: could not list positions — {e}")
+            return actions
+
+        if not positions:
+            log.info("PositionMonitor: no open positions.")
+            return actions
+
+        log.info(f"PositionMonitor: checking {len(positions)} position(s)...")
+
+        for pos in positions:
+            symbol = pos.symbol
+            qty    = int(float(pos.qty))
+
+            try:
+                # Daily data for indicators
+                df = fetch_data(symbol, days=self.cfg.lookback_days)
+                ind   = Indicators(df, self.cfg)
+                strat = Strategies(ind)
+                r     = ind.df.iloc[-1]
+
+                # Current intraday price
+                cur_price = self._current_price(symbol)
+                if cur_price is None:
+                    cur_price = float(pos.current_price or r["Close"])
+
+                stop   = float(r["sl"])
+                target = float(r["tp"])
+
+                log.info(
+                    f"  {symbol}: cur=${cur_price:.2f}  "
+                    f"stop=${stop:.2f}  target=${target:.2f}  "
+                    f"TT={int(r['tt_score'])}/7  stage2={bool(r['stage2'])}"
+                )
+
+                # Priority 1: Exit — stop hit
+                if cur_price <= stop:
+                    reason = f"Stop hit: ${cur_price:.2f} ≤ ${stop:.2f}"
+                    log.info(f"  → EXIT ({reason})")
+                    self._exit(symbol, qty)
+                    actions.append(MonitorAction(symbol, "exit", reason, cur_price, qty))
+                    continue
+
+                # Priority 2: Exit — signal (EMA50 break or Stage 4)
+                exit_s = strat.exit_signal()
+                if exit_s:
+                    reason = f"Exit signal: {exit_s.reason}"
+                    log.info(f"  → EXIT ({reason})")
+                    self._exit(symbol, qty)
+                    actions.append(MonitorAction(symbol, "exit", reason, cur_price, qty))
+                    continue
+
+                # Priority 3: Trim at target
+                if cur_price >= target and qty >= 2:
+                    trimmed = self._trim(symbol, qty)
+                    reason  = f"Target reached: ${cur_price:.2f} ≥ ${target:.2f} → sold {trimmed} shares"
+                    log.info(f"  → TRIM ({reason})")
+                    actions.append(MonitorAction(symbol, "trim", reason, cur_price, trimmed))
+                    continue
+
+                # Hold — check if any new entry signals worth noting
+                new_sigs = strat.all_signals()
+                if new_sigs:
+                    sig_names = ", ".join(s.strategy for s in new_sigs)
+                    reason = f"New signals: {sig_names}"
+                    log.info(f"  → HOLD with new signal(s): {reason}")
+                    actions.append(MonitorAction(symbol, "hold", reason, cur_price, qty))
+                else:
+                    log.info(f"  → HOLD — no action needed")
+
+            except Exception as e:
+                log.warning(f"  {symbol}: monitor error — {e}")
+                continue
+
+        log.info(f"PositionMonitor: {len(actions)} action(s) logged.")
+        return actions
+
+    # ── monitor alert email ────────────────────────────────────────────────────
+    @staticmethod
+    def _monitor_html(actions: list[MonitorAction], date_str: str) -> tuple[str, str]:
+        if not actions:
+            rows = '<tr><td colspan="4" class="neu" style="text-align:center">All positions holding — no action taken.</td></tr>'
+        else:
+            rows = ""
+            for a in actions:
+                if a.action == "exit":
+                    cls, icon = "no",   "🚨 EXIT"
+                elif a.action == "trim":
+                    cls, icon = "warn", "✂️  TRIM"
+                elif a.action == "hold":
+                    cls, icon = "ok",   "⚡ SIGNAL"
+                else:
+                    cls, icon = "neu",  "HOLD"
+                rows += f"""
+                <tr>
+                  <td><b>{a.ticker}</b></td>
+                  <td class="{cls}">{icon}</td>
+                  <td>${a.price:.2f}</td>
+                  <td style="color:#b0bec5;font-size:12px">{a.reason}</td>
+                </tr>"""
+
+        html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+        <style>{_CSS}</style></head><body><div class="card">
+        <h2>📡 POSITION MONITOR — {date_str}</h2>
+        <p style="color:#9e9e9e;font-size:13px">15-minute position check. Actions taken automatically.</p>
+        <table>
+          <tr>
+            <td style="color:#9e9e9e">Ticker</td>
+            <td style="color:#9e9e9e">Action</td>
+            <td style="color:#9e9e9e">Price</td>
+            <td style="color:#9e9e9e">Reason</td>
+          </tr>
+          {rows}
+        </table>
+        <p class="foot">QQQ Swing Suite · Monitor · {datetime.now().strftime('%Y-%m-%d %H:%M ET')}</p>
+        </div></body></html>"""
+
+        exits  = sum(1 for a in actions if a.action == "exit")
+        trims  = sum(1 for a in actions if a.action == "trim")
+        sigs   = sum(1 for a in actions if a.action == "hold")
+        parts  = []
+        if exits: parts.append(f"{exits} exit{'s' if exits > 1 else ''}")
+        if trims: parts.append(f"{trims} trim{'s' if trims > 1 else ''}")
+        if sigs:  parts.append(f"{sigs} new signal{'s' if sigs > 1 else ''}")
+        summary = ", ".join(parts) if parts else "all holding"
+        subj    = f"📡 Monitor Alert ({summary}) — {date_str}"
+        return subj, html
+
+
 class ReportBuilder:
     def __init__(self, cfg: Config):
         self.cfg     = cfg
@@ -1358,7 +1799,7 @@ if __name__ == "__main__":
         max_position_pct = 0.15,
     )
 
-    mode = sys.argv[1] if len(sys.argv) > 1 else "--run"
+    mode   = sys.argv[1] if len(sys.argv) > 1 else "--run"
     mailer = Emailer(cfg)
 
     if mode == "--premarket":
@@ -1379,5 +1820,42 @@ if __name__ == "__main__":
         bot     = TradingBot(cfg)
         signals = bot.run()
 
+    elif mode == "--trade":
+        # ── Morning trade execution ─────────────────────────────────────────
+        # 1. Run full market scan (same as pre-market email)
+        # 2. Execute qualifying orders via Alpaca
+        # 3. Send trade confirmation email
+        log.info("=== TRADE EXECUTION MODE ===")
+        date_str = datetime.now(pytz.timezone("America/New_York")).strftime("%A, %B %d %Y")
+
+        scanner  = MarketScanner(cfg)
+        top5     = scanner.scan(top_n=5)
+
+        executor = TradeExecutor(cfg)
+        trades   = executor.execute(top5)
+
+        subject, html = TradeExecutor._trades_html(trades, date_str)
+        log.info(f"Subject: {subject}")
+        mailer.send(subject, html)
+
+    elif mode == "--monitor":
+        # ── 15-minute position monitor ─────────────────────────────────────
+        # Check all open positions for exits, trims, or new signals
+        # Only sends email if there are noteworthy actions
+        log.info("=== POSITION MONITOR MODE ===")
+        date_str = datetime.now(pytz.timezone("America/New_York")).strftime("%A, %B %d %Y")
+
+        monitor = PositionMonitor(cfg)
+        actions = monitor.scan()
+
+        # Send email only when there's an exit, trim, or new signal to flag
+        notable = [a for a in actions if a.action in ("exit", "trim", "hold")]
+        if notable:
+            subject, html = PositionMonitor._monitor_html(actions, date_str)
+            log.info(f"Subject: {subject}")
+            mailer.send(subject, html)
+        else:
+            log.info("Monitor: nothing to report — no email sent.")
+
     else:
-        print("Usage: python3 trading_bot.py [--premarket | --midday | --run]")
+        print("Usage: python3 trading_bot.py [--premarket | --midday | --run | --trade | --monitor]")
