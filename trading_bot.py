@@ -651,6 +651,9 @@ def _vix_rule(vix: float) -> str:
 # PRE-MARKET SCANNER
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Personal focus tickers — always shown in every email with full signal status
+FOCUS_TICKERS = ["NVDA", "AMZN", "TSLA", "SU.TO", "GME", "AMC"]
+
 # Nasdaq-100 + high-cap S&P watchlist (covers the QQQ heat map universe)
 _WATCHLIST = [
     "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","AVGO","COST","NFLX",
@@ -663,6 +666,7 @@ _WATCHLIST = [
     "LLY","UNH","ABBV","JNJ","MRK","PFE","BMY","GILD","AMGN","REGN",
     "XOM","CVX","COP","OXY","SLB","HAL","MPC","VLO","PSX","EOG",
     "SPY","QQQ","IWM","GLD","SLV","TLT","USO","UNG","ARKK","SOXS",
+    "GME","AMC","SU.TO",
 ]
 
 @dataclass
@@ -841,6 +845,93 @@ class ReportBuilder:
         self.date    = self.df.index[-1].strftime("%A, %B %d %Y")
         self.scanner = PreMarketScanner()
 
+    # ── focus ticker section ──────────────────────────────────────────────────
+    @staticmethod
+    def _focus_section(prepost: bool = False) -> str:
+        """Pull latest price, % change, RSI, and MACD for each focus ticker."""
+        rows = ""
+        for ticker in FOCUS_TICKERS:
+            try:
+                df = yf.download(ticker, period="60d", interval="1d",
+                                 prepost=prepost, progress=False, auto_adjust=True)
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                df = df.dropna()
+                if len(df) < 30:
+                    raise ValueError("not enough data")
+
+                close     = df["Close"]
+                price     = float(close.iloc[-1])
+                prev      = float(close.iloc[-2])
+                chg       = ((price - prev) / prev) * 100
+                chg_cls   = "ok" if chg >= 0 else "no"
+                arrow     = "▲" if chg >= 0 else "▼"
+
+                # RSI
+                delta = close.diff()
+                gain  = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
+                loss  = (-delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
+                rsi   = float(100 - (100 / (1 + gain / loss.replace(0, np.nan)))).iloc[-1] if hasattr((100 - (100 / (1 + gain / loss.replace(0, np.nan)))), 'iloc') else float((100 - (100 / (1 + gain / loss.replace(0, np.nan)))).iloc[-1])
+
+                # Quick RSI calc
+                rs_series = gain / loss.replace(0, np.nan)
+                rsi_val   = float((100 - 100 / (1 + rs_series)).iloc[-1])
+                rsi_cls   = "ok" if 50 < rsi_val < 70 else "warn" if 40 <= rsi_val <= 50 else "no"
+
+                # MACD
+                ema12  = close.ewm(span=12, adjust=False).mean()
+                ema26  = close.ewm(span=26, adjust=False).mean()
+                macd   = ema12 - ema26
+                sig    = macd.ewm(span=9,  adjust=False).mean()
+                m_bull = bool(macd.iloc[-1] > sig.iloc[-1] and macd.iloc[-1] > 0)
+                m_cls  = "ok" if m_bull else "no"
+                m_txt  = "Bull" if m_bull else "Bear"
+
+                # Pre-market price if requested
+                pm_txt = ""
+                if prepost:
+                    try:
+                        pm = yf.download(ticker, period="1d", interval="1m",
+                                         prepost=True, progress=False, auto_adjust=True)
+                        if isinstance(pm.columns, pd.MultiIndex):
+                            pm.columns = pm.columns.get_level_values(0)
+                        pm_et  = pm.copy()
+                        pm_et.index = pd.to_datetime(pm_et.index).tz_convert("America/New_York")
+                        pm_bars = pm_et[
+                            (pm_et.index.hour >= 4) &
+                            ~((pm_et.index.hour == 9) & (pm_et.index.minute >= 30))
+                        ]
+                        if not pm_bars.empty:
+                            pm_price = float(pm_bars["Close"].dropna().iloc[-1])
+                            pm_chg   = ((pm_price - price) / price) * 100
+                            pm_cls   = "ok" if pm_chg >= 0 else "no"
+                            pm_txt   = f'<span class="{pm_cls}"> PM {pm_chg:+.1f}%</span>'
+                    except Exception:
+                        pass
+
+                rows += f"""
+                <tr>
+                  <td><b>{ticker}</b></td>
+                  <td>${price:.2f}{pm_txt}</td>
+                  <td class="{chg_cls}">{arrow} {chg:+.2f}%</td>
+                  <td class="{rsi_cls}">{rsi_val:.1f}</td>
+                  <td class="{m_cls}">{m_txt}</td>
+                </tr>"""
+            except Exception as e:
+                rows += f'<tr><td><b>{ticker}</b></td><td colspan="4" class="neu">unavailable</td></tr>'
+
+        return f"""
+        <table>
+          <tr>
+            <td style="color:#9e9e9e">Ticker</td>
+            <td style="color:#9e9e9e">Price</td>
+            <td style="color:#9e9e9e">Chg</td>
+            <td style="color:#9e9e9e">RSI</td>
+            <td style="color:#9e9e9e">MACD</td>
+          </tr>
+          {rows}
+        </table>"""
+
     # ── shared movers table ───────────────────────────────────────────────────
     @staticmethod
     def _movers_table(movers: list[PreMarketMover], vol_label: str = "Volume") -> str:
@@ -927,6 +1018,9 @@ class ReportBuilder:
         <h3>🟢 Top 3 Bullish Pre-Market</h3>
         {movers_html}
 
+        <h3>📌 Focus Tickers</h3>
+        {self._focus_section(prepost=True)}
+
         <h3>QQQ Snapshot</h3>
         <table>{self._snapshot_rows()}</table>
 
@@ -996,6 +1090,9 @@ class ReportBuilder:
 
         <h3>🟢 Top 3 Bullish Intraday</h3>
         {intra_movers_html}
+
+        <h3>📌 Focus Tickers</h3>
+        {self._focus_section(prepost=False)}
 
         <h3>Daily Indicators</h3>
         <table>{self._snapshot_rows()}</table>
