@@ -933,14 +933,45 @@ class MarketScanner:
         "MNST","MRNA","MRVL","MSFT","MU","NFLX","NVDA","NXPI","ODFL","ON","ORLY","PANW",
         "PAYX","PCAR","PDD","PEP","PYPL","QCOM","REGN","ROST","SBUX","SIRI","SNPS",
         "TEAM","TMUS","TSLA","TTWO","TXN","VRSK","VRTX","WBD","XEL",
-        # Canadian / focus extras
-        "SU.TO","GME","AMC","SHOP","COIN","HOOD","SOFI","RDDT","APP",
+        # US focus / high-momentum extras
+        "GME","AMC","SHOP","COIN","HOOD","SOFI","RDDT","APP",
+    ]
+
+    # TSX 60 + major Canadian stocks (yfinance uses .TO suffix)
+    _TSX = [
+        # Big 6 Banks
+        "RY.TO","TD.TO","BNS.TO","BMO.TO","CM.TO","NA.TO",
+        # Insurance / Financials
+        "MFC.TO","SLF.TO","GWO.TO","IAG.TO","IFC.TO","POW.TO","FFH.TO",
+        # Energy — oil sands, pipelines, E&P
+        "SU.TO","CNQ.TO","CVE.TO","IMO.TO","ENB.TO","TRP.TO","PPL.TO",
+        "ARX.TO","ERF.TO","PEY.TO","TVE.TO","BTE.TO","MEG.TO","WCP.TO",
+        # Mining / Materials
+        "ABX.TO","WPM.TO","FNV.TO","AEM.TO","AGI.TO","FM.TO","CCO.TO",
+        "LUN.TO","CS.TO","HBM.TO","OGC.TO","NGT.TO","ELD.TO","OR.TO",
+        # Telecoms
+        "BCE.TO","T.TO","RCI-B.TO",
+        # Railways
+        "CNR.TO","CP.TO",
+        # Retail / Consumer
+        "ATD.TO","DOL.TO","L.TO","MRU.TO","WN.TO","EMP-A.TO",
+        # Technology
+        "CSU.TO","OTEX.TO","KXS.TO","DSG.TO","LSPD.TO","NVEI.TO",
+        # Industrials / Infrastructure
+        "WSP.TO","STN.TO","TIH.TO","CAE.TO","AC.TO","BBD-B.TO",
+        # Utilities
+        "FTS.TO","AQN.TO","EMA.TO","H.TO","BEP-UN.TO","BEPC.TO",
+        # Real Estate / Diversified
+        "BAM.TO","BN.TO","BIP-UN.TO","BIPC.TO","WCN.TO","TRI.TO","QSR.TO",
+        # REITs
+        "REI-UN.TO","AP-UN.TO","DIR-UN.TO","CRT-UN.TO","SRU-UN.TO",
     ]
 
     @staticmethod
     def _get_universe() -> list[str]:
-        # Deduplicate and return
-        return list(dict.fromkeys(MarketScanner._SP500))
+        # Merge S&P 500 / Nasdaq 100 + TSX, deduplicate, return
+        combined = MarketScanner._SP500 + MarketScanner._TSX
+        return list(dict.fromkeys(combined))
 
     # ── scan ──────────────────────────────────────────────────────────────────
     def scan(self, top_n: int = 5) -> list[ScanResult]:
@@ -1035,7 +1066,6 @@ class TradeExecutor:
 
     Rules:
       • Max 3 simultaneous open positions (Alpaca positions count)
-      • Skip non-US tickers (anything with '.' in symbol, e.g. SU.TO)
       • Require TT ≥ 5 and Stage not 4-Bear
       • Position sizing: 1.5% portfolio risk per trade, capped at 15% portfolio value
         qty = floor(min(portfolio * 0.015 / risk_per_share,
@@ -1055,11 +1085,6 @@ class TradeExecutor:
                 self.broker = AlpacaBroker(cfg)
             except Exception as e:
                 log.warning(f"TradeExecutor: broker unavailable — {e}")
-
-    @staticmethod
-    def _is_us_ticker(symbol: str) -> bool:
-        """Return False for non-US tickers like SU.TO (TSX)."""
-        return "." not in symbol
 
     def _open_position_count(self) -> int:
         if not self.broker:
@@ -1109,11 +1134,6 @@ class TradeExecutor:
                 break
 
             ticker = result.ticker
-
-            # Filter: US only
-            if not self._is_us_ticker(ticker):
-                log.info(f"  {ticker}: non-US ticker — skip.")
-                continue
 
             # Filter: TT ≥ 5
             if result.tt_score < 5:
