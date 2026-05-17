@@ -832,6 +832,186 @@ class PreMarketScanner:
         return top
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# MARKET SCANNER  — full S&P 500 + Nasdaq 100 universe
+# ─────────────────────────────────────────────────────────────────────────────
+@dataclass
+class ScanResult:
+    ticker:   str
+    score:    float
+    price:    float
+    stop:     float
+    target:   float
+    tt_score: int
+    stage:    str
+    rsi:      float
+    signals:  list
+    vol_surge:bool
+
+    def signal_names(self) -> str:
+        return " · ".join(s.strategy for s in self.signals)
+
+    def rr(self) -> float:
+        risk   = abs(self.price - self.stop)
+        reward = abs(self.target - self.price)
+        return round(reward / risk, 2) if risk > 0 else 0.0
+
+
+class MarketScanner:
+    """
+    Fetches S&P 500 + Nasdaq 100 tickers from Wikipedia, downloads 1 year of
+    daily bars in one batch, runs the full 6-strategy signal suite on every
+    ticker, scores each hit, and returns the top N ranked setups.
+
+    Scoring:
+      TT score × 2  (max 14)  — trend quality
+      signals × 3   (max ~18) — number of strategies firing
+      Stage 2 bonus +2        — confirmed uptrend
+      Vol surge     +1        — institutional volume
+      MACD bull     +1        — momentum confirmed
+    """
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+
+    # ── universe ──────────────────────────────────────────────────────────────
+    # S&P 500 + Nasdaq 100 embedded — avoids scraping fragility
+    _SP500 = [
+        "A","AAL","AAP","AAPL","ABBV","ABT","ACGL","ACN","ADBE","ADI","ADM","ADP","ADSK",
+        "AEE","AEP","AES","AFL","AIG","AIZ","AJG","AKAM","ALB","ALGN","ALL","ALLE","AMAT",
+        "AMCR","AMD","AME","AMGN","AMP","AMT","AMZN","ANET","ANSS","AON","AOS","APA","APD",
+        "APH","APTV","ARE","ATO","AVB","AVGO","AVY","AWK","AXON","AXP","AZO",
+        "BA","BAC","BALL","BAX","BBWI","BBY","BDX","BEN","BF-B","BG","BIIB","BIO","BK",
+        "BKNG","BKR","BLK","BMY","BR","BRK-B","BRO","BSX","BX",
+        "C","CAG","CAH","CARR","CAT","CB","CBOE","CBRE","CCI","CCL","CDNS","CDW","CE",
+        "CEG","CF","CFG","CHD","CHRW","CHTR","CI","CINF","CL","CLX","CMA","CMCSA","CME",
+        "CMG","CMI","CMS","CNC","CNP","COF","COO","COP","COST","CPB","CPRT","CPT","CRL",
+        "CRM","CSCO","CSGP","CSX","CTAS","CTLT","CTRA","CTSH","CTVA","CVS","CVX","CZR",
+        "D","DAL","DAY","DD","DE","DECK","DFS","DG","DGX","DHI","DHR","DIS","DLR","DLTR",
+        "DOC","DOV","DOW","DPZ","DRI","DTE","DUK","DVA","DVN","DXC",
+        "EA","EBAY","ECL","ED","EFX","EG","EIX","EL","ELV","EMN","EMR","ENPH","EOG",
+        "EPAM","EQIX","EQR","EQT","ES","ESS","ETN","ETR","ETSY","EVRG","EW","EXC","EXR",
+        "F","FANG","FAST","FCX","FDS","FDX","FE","FFIV","FI","FICO","FIS","FITB","FLT",
+        "FMC","FOX","FOXA","FRT","FSLR","FTNT",
+        "GD","GE","GEHC","GEN","GILD","GIS","GL","GLW","GM","GNRC","GOOGL","GOOG","GPC",
+        "GPN","GRMN","GS","GWW",
+        "HAL","HAS","HBAN","HCA","HD","HES","HIG","HII","HLT","HOLX","HON","HPE","HPQ",
+        "HRL","HSIC","HST","HSY","HUM","HWM",
+        "IBM","ICE","IDXX","IEX","IFF","ILMN","INCY","INTC","INTU","INVH","IP","IPG",
+        "IQV","IR","IRM","ISRG","IT","ITW","IVZ",
+        "J","JBHT","JCI","JKHY","JNJ","JPM","JWN",
+        "K","KDP","KEY","KEYS","KHC","KIM","KLAC","KMB","KMI","KMX","KO","KR",
+        "L","LDOS","LEN","LH","LHX","LIN","LKQ","LLY","LMT","LNT","LOW","LRCX","LUV",
+        "LVS","LW","LYB","LYV",
+        "MA","MAA","MAR","MAS","MCD","MCHP","MCK","MCO","MDLZ","MDT","MET","META","MGM",
+        "MHK","MKC","MKTX","MLM","MMC","MMM","MNST","MO","MOH","MOS","MPC","MPWR","MRK",
+        "MRNA","MRO","MS","MSCI","MSFT","MSI","MTB","MTD","MU","NCLH",
+        "NDAQ","NEE","NEM","NFLX","NI","NKE","NOC","NOW","NRG","NSC","NTAP","NTRS","NUE",
+        "NVDA","NVR","NWS","NWSA",
+        "O","ODFL","OKE","OMC","ON","ORCL","ORLY","OXY",
+        "PANW","PARA","PAYC","PAYX","PCAR","PCG","PEG","PEP","PFE","PFG","PG","PGR",
+        "PH","PHM","PKG","PLD","PM","PNC","PNR","PNW","PODD","POOL","PPG","PPL","PRU",
+        "PSA","PSX","PTC","PWR","PXD",
+        "QCOM","QRVO",
+        "RCL","REG","REGN","RF","RJF","RL","RMD","ROK","ROL","ROP","ROST","RSG","RTX",
+        "SBAC","SBUX","SCHW","SEE","SHW","SJM","SLB","SMCI","SNA","SNPS","SO","SPG",
+        "SPGI","SRE","STE","STLD","STT","STX","STZ","SWK","SWKS","SYF","SYK","SYY",
+        "T","TAP","TDG","TDY","TECH","TEL","TER","TFC","TFX","TGT","TJX","TMO","TMUS",
+        "TPR","TRGP","TRMB","TROW","TRV","TSCO","TSLA","TSN","TT","TTWO","TXN","TYL",
+        "UAL","UDR","UHS","ULTA","UNH","UNP","UPS","URI","USB",
+        "V","VFC","VICI","VLO","VMC","VRSK","VRSN","VRTX","VTR","VTRS",
+        "WAB","WAT","WBA","WBD","WDC","WELL","WFC","WHR","WM","WMB","WMT","WRB","WST",
+        "WTW","WY","WYNN",
+        "XEL","XOM","XRAY","XYL",
+        "YUM",
+        "ZBH","ZBRA","ZTS",
+        # Nasdaq 100 extras not in S&P 500
+        "ABNB","ADSK","AEP","ALGN","ANSS","ARM","ASML","BIIB","BKNG","CCEP","CDNS",
+        "CEG","CHTR","CMCSA","COST","CPRT","CRWD","CSCO","CSGP","CSX","DDOG","DLTR",
+        "DXCM","EA","EXC","FANG","FAST","FTNT","GFS","GILD","HON","IDXX","ILMN","INTC",
+        "INTU","ISRG","KDP","KLAC","LRCX","LULU","MAR","MCHP","MDLZ","MELI","META",
+        "MNST","MRNA","MRVL","MSFT","MU","NFLX","NVDA","NXPI","ODFL","ON","ORLY","PANW",
+        "PAYX","PCAR","PDD","PEP","PYPL","QCOM","REGN","ROST","SBUX","SIRI","SNPS",
+        "TEAM","TMUS","TSLA","TTWO","TXN","VRSK","VRTX","WBD","XEL",
+        # Canadian / focus extras
+        "SU.TO","GME","AMC","SHOP","COIN","HOOD","SOFI","RDDT","APP",
+    ]
+
+    @staticmethod
+    def _get_universe() -> list[str]:
+        # Deduplicate and return
+        return list(dict.fromkeys(MarketScanner._SP500))
+
+    # ── scan ──────────────────────────────────────────────────────────────────
+    def scan(self, top_n: int = 5) -> list[ScanResult]:
+        universe = self._get_universe()
+        log.info(f"Market scan: downloading {len(universe)} tickers (1y daily)…")
+
+        try:
+            raw = yf.download(
+                tickers     = " ".join(universe),
+                period      = "1y",
+                interval    = "1d",
+                progress    = False,
+                auto_adjust = True,
+                group_by    = "ticker",
+            )
+        except Exception as e:
+            log.error(f"Batch download failed: {e}")
+            return []
+
+        log.info("  Download complete. Running signal suite…")
+        results: list[ScanResult] = []
+
+        for ticker in universe:
+            try:
+                df = raw[ticker].dropna(how="all") if isinstance(raw.columns, pd.MultiIndex) else raw.dropna(how="all")
+                if len(df) < 60:
+                    continue
+
+                ind    = Indicators(df, self.cfg)
+                strat  = Strategies(ind)
+                sigs   = strat.all_signals()
+                exit_s = strat.exit_signal()
+
+                # Skip if exit firing or no entry signals
+                if exit_s or not sigs:
+                    continue
+
+                r     = ind.df.iloc[-1]
+                stage = "2-Bull" if r["stage2"] else "4-Bear" if r["stage4"] else "1/3"
+
+                score = (
+                    int(r["tt_score"]) * 2 +
+                    len(sigs) * 3 +
+                    (2 if r["stage2"]    else 0) +
+                    (1 if r["vol_surge"] else 0) +
+                    (1 if r["macd_bull"] else 0)
+                )
+
+                results.append(ScanResult(
+                    ticker    = ticker,
+                    score     = score,
+                    price     = float(r["Close"]),
+                    stop      = float(r["sl"]),
+                    target    = float(r["tp"]),
+                    tt_score  = int(r["tt_score"]),
+                    stage     = stage,
+                    rsi       = float(r["rsi"]),
+                    signals   = sigs,
+                    vol_surge = bool(r["vol_surge"]),
+                ))
+            except Exception:
+                continue
+
+        results.sort(key=lambda x: x.score, reverse=True)
+        top = results[:top_n]
+        log.info(f"  {len(results)} setups found. Top {top_n}:")
+        for r in top:
+            log.info(f"    {r.ticker:6s}  score={r.score}  TT={r.tt_score}/7  {r.signal_names()}")
+        return top
+
+
 class ReportBuilder:
     def __init__(self, cfg: Config):
         self.cfg     = cfg
@@ -844,6 +1024,44 @@ class ReportBuilder:
         self.vix     = float(self.vix_df["Close"].iloc[-1])
         self.date    = self.df.index[-1].strftime("%A, %B %d %Y")
         self.scanner = PreMarketScanner()
+        self.mkt_scanner = MarketScanner(cfg)
+
+    # ── top 5 market scan section ─────────────────────────────────────────────
+    @staticmethod
+    def _top5_html(results: list[ScanResult]) -> str:
+        if not results:
+            return '<div class="rule">No qualifying setups found in today\'s scan.</div>'
+        rows = ""
+        for r in results:
+            stage_cls = "ok" if r.stage == "2-Bull" else "no" if r.stage == "4-Bear" else "warn"
+            vol_cls   = "ok" if r.vol_surge else "neu"
+            rows += f"""
+            <tr>
+              <td><b>{r.ticker}</b></td>
+              <td>${r.price:.2f}</td>
+              <td class="{stage_cls}">{r.stage}</td>
+              <td class="{'ok' if r.tt_score >= 6 else 'warn'}">{r.tt_score}/7</td>
+              <td class="{vol_cls}">{'✔' if r.vol_surge else '—'}</td>
+              <td style="color:#b0bec5;font-size:11px">{r.signal_names()}</td>
+            </tr>
+            <tr>
+              <td colspan="2" style="color:#9e9e9e;font-size:11px">
+                Stop ${r.stop:.2f} · Target ${r.target:.2f} · R:R {r.rr()}
+              </td>
+              <td colspan="4" style="color:#9e9e9e;font-size:11px">RSI {r.rsi:.1f} · Score {r.score}</td>
+            </tr>"""
+        return f"""
+        <table>
+          <tr>
+            <td style="color:#9e9e9e">Ticker</td>
+            <td style="color:#9e9e9e">Price</td>
+            <td style="color:#9e9e9e">Stage</td>
+            <td style="color:#9e9e9e">TT</td>
+            <td style="color:#9e9e9e">Vol</td>
+            <td style="color:#9e9e9e">Signals</td>
+          </tr>
+          {rows}
+        </table>"""
 
     # ── focus ticker section ──────────────────────────────────────────────────
     @staticmethod
@@ -1001,6 +1219,10 @@ class ReportBuilder:
         if not sig_html:
             sig_html = '<div class="rule">No active entry signals. Stay patient.</div>'
 
+        # Full market scan — top 5 setups
+        top5        = self.mkt_scanner.scan(top_n=5)
+        top5_html   = self._top5_html(top5)
+
         # Pre-market heat map — top 3 bullish movers
         movers      = self.scanner.scan()
         movers_html = self._movers_table(movers, vol_label="PM Vol")
@@ -1014,6 +1236,9 @@ class ReportBuilder:
           <tr><td>VIX</td><td class="{_vix_class(self.vix)}">{self.vix:.2f}</td></tr>
         </table>
         <div class="rule">{_vix_rule(self.vix)}</div>
+
+        <h3>🔍 Top 5 Market Setups Today</h3>
+        {top5_html}
 
         <h3>🟢 Top 3 Bullish Pre-Market</h3>
         {movers_html}
