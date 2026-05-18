@@ -879,39 +879,39 @@ class MarketScanner:
     _SP500 = [
         "A","AAL","AAP","AAPL","ABBV","ABT","ACGL","ACN","ADBE","ADI","ADM","ADP","ADSK",
         "AEE","AEP","AES","AFL","AIG","AIZ","AJG","AKAM","ALB","ALGN","ALL","ALLE","AMAT",
-        "AMCR","AMD","AME","AMGN","AMP","AMT","AMZN","ANET","ANSS","AON","AOS","APA","APD",
+        "AMCR","AMD","AME","AMGN","AMP","AMT","AMZN","ANET","AON","AOS","APA","APD",
         "APH","APTV","ARE","ATO","AVB","AVGO","AVY","AWK","AXON","AXP","AZO",
-        "BA","BAC","BALL","BAX","BBWI","BBY","BDX","BEN","BF-B","BG","BIIB","BIO","BK",
+        "BA","BAC","BALL","BAX","BBWI","BBY","BDX","BEN","BG","BIIB","BIO","BK",
         "BKNG","BKR","BLK","BMY","BR","BRK-B","BRO","BSX","BX",
         "C","CAG","CAH","CARR","CAT","CB","CBOE","CBRE","CCI","CCL","CDNS","CDW","CE",
-        "CEG","CF","CFG","CHD","CHRW","CHTR","CI","CINF","CL","CLX","CMA","CMCSA","CME",
+        "CEG","CF","CFG","CHD","CHRW","CHTR","CI","CINF","CL","CLX","CMCSA","CME",
         "CMG","CMI","CMS","CNC","CNP","COF","COO","COP","COST","CPB","CPRT","CPT","CRL",
-        "CRM","CSCO","CSGP","CSX","CTAS","CTLT","CTRA","CTSH","CTVA","CVS","CVX","CZR",
-        "D","DAL","DAY","DD","DE","DECK","DFS","DG","DGX","DHI","DHR","DIS","DLR","DLTR",
+        "CRM","CSCO","CSGP","CSX","CTAS","CTRA","CTSH","CTVA","CVS","CVX","CZR",
+        "D","DAL","DD","DE","DECK","DG","DGX","DHI","DHR","DIS","DLR","DLTR",
         "DOC","DOV","DOW","DPZ","DRI","DTE","DUK","DVA","DVN","DXC",
         "EA","EBAY","ECL","ED","EFX","EG","EIX","EL","ELV","EMN","EMR","ENPH","EOG",
         "EPAM","EQIX","EQR","EQT","ES","ESS","ETN","ETR","ETSY","EVRG","EW","EXC","EXR",
-        "F","FANG","FAST","FCX","FDS","FDX","FE","FFIV","FI","FICO","FIS","FITB","FLT",
+        "F","FANG","FAST","FCX","FDS","FDX","FE","FFIV","FICO","FIS","FITB",
         "FMC","FOX","FOXA","FRT","FSLR","FTNT",
         "GD","GE","GEHC","GEN","GILD","GIS","GL","GLW","GM","GNRC","GOOGL","GOOG","GPC",
         "GPN","GRMN","GS","GWW",
-        "HAL","HAS","HBAN","HCA","HD","HES","HIG","HII","HLT","HOLX","HON","HPE","HPQ",
+        "HAL","HAS","HBAN","HCA","HD","HIG","HII","HLT","HOLX","HON","HPE","HPQ",
         "HRL","HSIC","HST","HSY","HUM","HWM",
-        "IBM","ICE","IDXX","IEX","IFF","ILMN","INCY","INTC","INTU","INVH","IP","IPG",
+        "IBM","ICE","IDXX","IEX","IFF","ILMN","INCY","INTC","INTU","INVH","IP",
         "IQV","IR","IRM","ISRG","IT","ITW","IVZ",
-        "J","JBHT","JCI","JKHY","JNJ","JPM","JWN",
-        "K","KDP","KEY","KEYS","KHC","KIM","KLAC","KMB","KMI","KMX","KO","KR",
+        "J","JBHT","JCI","JKHY","JNJ","JPM",
+        "KDP","KEY","KEYS","KHC","KIM","KLAC","KMB","KMI","KMX","KO","KR",
         "L","LDOS","LEN","LH","LHX","LIN","LKQ","LLY","LMT","LNT","LOW","LRCX","LUV",
         "LVS","LW","LYB","LYV",
         "MA","MAA","MAR","MAS","MCD","MCHP","MCK","MCO","MDLZ","MDT","MET","META","MGM",
-        "MHK","MKC","MKTX","MLM","MMC","MMM","MNST","MO","MOH","MOS","MPC","MPWR","MRK",
-        "MRNA","MRO","MS","MSCI","MSFT","MSI","MTB","MTD","MU","NCLH",
+        "MHK","MKC","MKTX","MLM","MMM","MNST","MO","MOH","MOS","MPC","MPWR","MRK",
+        "MRNA","MS","MSCI","MSFT","MSI","MTB","MTD","MU","NCLH",
         "NDAQ","NEE","NEM","NFLX","NI","NKE","NOC","NOW","NRG","NSC","NTAP","NTRS","NUE",
         "NVDA","NVR","NWS","NWSA",
         "O","ODFL","OKE","OMC","ON","ORCL","ORLY","OXY",
-        "PANW","PARA","PAYC","PAYX","PCAR","PCG","PEG","PEP","PFE","PFG","PG","PGR",
+        "PANW","PAYC","PAYX","PCAR","PCG","PEG","PEP","PFE","PFG","PG","PGR",
         "PH","PHM","PKG","PLD","PM","PNC","PNR","PNW","PODD","POOL","PPG","PPL","PRU",
-        "PSA","PSX","PTC","PWR","PXD",
+        "PSA","PSX","PTC","PWR",
         "QCOM","QRVO",
         "RCL","REG","REGN","RF","RJF","RL","RMD","ROK","ROL","ROP","ROST","RSG","RTX",
         "SBAC","SBUX","SCHW","SEE","SHW","SJM","SLB","SMCI","SNA","SNPS","SO","SPG",
@@ -920,13 +920,13 @@ class MarketScanner:
         "TPR","TRGP","TRMB","TROW","TRV","TSCO","TSLA","TSN","TT","TTWO","TXN","TYL",
         "UAL","UDR","UHS","ULTA","UNH","UNP","UPS","URI","USB",
         "V","VFC","VICI","VLO","VMC","VRSK","VRSN","VRTX","VTR","VTRS",
-        "WAB","WAT","WBA","WBD","WDC","WELL","WFC","WHR","WM","WMB","WMT","WRB","WST",
+        "WAB","WAT","WBD","WDC","WELL","WFC","WHR","WM","WMB","WMT","WRB","WST",
         "WTW","WY","WYNN",
         "XEL","XOM","XRAY","XYL",
         "YUM",
         "ZBH","ZBRA","ZTS",
         # Nasdaq 100 extras not in S&P 500
-        "ABNB","ADSK","AEP","ALGN","ANSS","ARM","ASML","BIIB","BKNG","CCEP","CDNS",
+        "ABNB","ADSK","AEP","ALGN","ARM","ASML","BIIB","BKNG","CCEP","CDNS",
         "CEG","CHTR","CMCSA","COST","CPRT","CRWD","CSCO","CSGP","CSX","DDOG","DLTR",
         "DXCM","EA","EXC","FANG","FAST","FTNT","GFS","GILD","HON","IDXX","ILMN","INTC",
         "INTU","ISRG","KDP","KLAC","LRCX","LULU","MAR","MCHP","MDLZ","MELI","META",
@@ -945,10 +945,10 @@ class MarketScanner:
         "MFC.TO","SLF.TO","GWO.TO","IAG.TO","IFC.TO","POW.TO","FFH.TO",
         # Energy — oil sands, pipelines, E&P
         "SU.TO","CNQ.TO","CVE.TO","IMO.TO","ENB.TO","TRP.TO","PPL.TO",
-        "ARX.TO","ERF.TO","PEY.TO","TVE.TO","BTE.TO","MEG.TO","WCP.TO",
+        "ARX.TO","PEY.TO","TVE.TO","BTE.TO","WCP.TO",
         # Mining / Materials
         "ABX.TO","WPM.TO","FNV.TO","AEM.TO","AGI.TO","FM.TO","CCO.TO",
-        "LUN.TO","CS.TO","HBM.TO","OGC.TO","NGT.TO","ELD.TO","OR.TO",
+        "LUN.TO","CS.TO","HBM.TO","OGC.TO","ELD.TO","OR.TO",
         # Telecoms
         "BCE.TO","T.TO","RCI-B.TO",
         # Railways
@@ -956,7 +956,7 @@ class MarketScanner:
         # Retail / Consumer
         "ATD.TO","DOL.TO","L.TO","MRU.TO","WN.TO","EMP-A.TO",
         # Technology
-        "CSU.TO","OTEX.TO","KXS.TO","DSG.TO","LSPD.TO","NVEI.TO",
+        "CSU.TO","OTEX.TO","KXS.TO","DSG.TO","LSPD.TO",
         # Industrials / Infrastructure
         "WSP.TO","STN.TO","TIH.TO","CAE.TO","AC.TO","BBD-B.TO",
         # Utilities
@@ -1086,6 +1086,16 @@ class TradeExecutor:
             except Exception as e:
                 log.warning(f"TradeExecutor: broker unavailable — {e}")
 
+    def _is_tradeable(self, symbol: str) -> bool:
+        """Check Alpaca knows this asset and it's fractionable or tradeable."""
+        if not self.broker:
+            return True   # dry-run: assume tradeable
+        try:
+            asset = self.broker.api.get_asset(symbol)
+            return asset.tradable
+        except Exception:
+            return False
+
     def _open_position_count(self) -> int:
         if not self.broker:
             return 0
@@ -1134,6 +1144,11 @@ class TradeExecutor:
                 break
 
             ticker = result.ticker
+
+            # Filter: Alpaca asset check (handles TSX and any unsupported symbol)
+            if not self._is_tradeable(ticker):
+                log.info(f"  {ticker}: not tradeable on Alpaca — skip.")
+                continue
 
             # Filter: TT ≥ 5
             if result.tt_score < 5:
