@@ -15,6 +15,7 @@ Broker: Alpaca Paper Trading API (set ALPACA_KEY / ALPACA_SECRET env vars)
 """
 
 import os
+import json
 import logging
 import smtplib
 import textwrap
@@ -42,6 +43,83 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("qqq_bot")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCAN CACHE  — pre-market results persisted to disk for intraday reuse
+# ─────────────────────────────────────────────────────────────────────────────
+SCAN_CACHE_PATH = "/tmp/qqq_scan_cache.json"
+
+
+def _save_scan_cache(results: list) -> None:
+    """Serialise ScanResult list to JSON so the 15-min monitor can reuse it."""
+    try:
+        data = [{
+            "ticker":    r.ticker,
+            "score":     r.score,
+            "price":     r.price,
+            "stop":      r.stop,
+            "target":    r.target,
+            "tt_score":  r.tt_score,
+            "stage":     r.stage,
+            "rsi":       r.rsi,
+            "signals":   [s.strategy for s in r.signals],
+            "vol_surge": r.vol_surge,
+            "ts":        datetime.now().isoformat(),
+        } for r in results]
+        with open(SCAN_CACHE_PATH, "w") as fh:
+            json.dump(data, fh)
+        log.info(f"Scan cache saved ({len(data)} results) → {SCAN_CACHE_PATH}")
+    except Exception as e:
+        log.warning(f"Could not save scan cache: {e}")
+
+
+class _CachedSetup:
+    """Lightweight stand-in for ScanResult built from cached JSON data."""
+    __slots__ = ("ticker","score","price","stop","target","tt_score",
+                 "stage","rsi","vol_surge","_sigs","ts")
+
+    def __init__(self, d: dict):
+        self.ticker    = d["ticker"]
+        self.score     = d["score"]
+        self.price     = d["price"]
+        self.stop      = d["stop"]
+        self.target    = d["target"]
+        self.tt_score  = d["tt_score"]
+        self.stage     = d["stage"]
+        self.rsi       = d["rsi"]
+        self.vol_surge = d["vol_surge"]
+        self._sigs     = d.get("signals", [])
+        self.ts        = d.get("ts", "")
+
+    def signal_names(self) -> str:
+        return " · ".join(self._sigs)
+
+    def rr(self) -> float:
+        risk   = abs(self.price - self.stop)
+        reward = abs(self.target - self.price)
+        return round(reward / risk, 2) if risk > 0 else 0.0
+
+
+def _load_scan_cache() -> list[_CachedSetup]:
+    """Load cached scan results. Returns empty list if cache is missing/stale."""
+    try:
+        with open(SCAN_CACHE_PATH) as fh:
+            data = json.load(fh)
+        if not data:
+            return []
+        age_mins = (datetime.now() - datetime.fromisoformat(data[0]["ts"])).seconds // 60
+        log.info(f"Scan cache loaded: {len(data)} results, age={age_mins} min")
+        # Discard cache older than 10 hours (stale after market close)
+        if age_mins > 600:
+            log.info("  Cache too old — ignoring.")
+            return []
+        return [_CachedSetup(d) for d in data]
+    except FileNotFoundError:
+        log.info("No scan cache found.")
+        return []
+    except Exception as e:
+        log.warning(f"Could not load scan cache: {e}")
+        return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1040,6 +1118,7 @@ class MarketScanner:
         log.info(f"  {len(results)} setups found. Top {top_n}:")
         for r in top:
             log.info(f"    {r.ticker:6s}  score={r.score}  TT={r.tt_score}/7  {r.signal_names()}")
+        _save_scan_cache(top)
         return top
 
 
@@ -1874,23 +1953,115 @@ if __name__ == "__main__":
         mailer.send(subject, html)
 
     elif mode == "--monitor":
-        # ── 15-minute position monitor ─────────────────────────────────────
-        # Check all open positions for exits, trims, or new signals
-        # Only sends email if there are noteworthy actions
-        log.info("=== POSITION MONITOR MODE ===")
-        date_str = datetime.now(pytz.timezone("America/New_York")).strftime("%A, %B %d %Y")
+        # ── 15-minute scan + position monitor ──────────────────────────────
+        # Every 15 min this does three things in order:
+        #   1. Load pre-market scan cache → execute new trades if under limit
+        #   2. Check all open positions for exits / trims / new signals
+        #   3. Email if any action was taken
+        log.info("=== MONITOR MODE (15-min) ===")
+        et       = pytz.timezone("America/New_York")
+        now_et   = datetime.now(et)
+        date_str = now_et.strftime("%A, %B %d %Y")
+        time_str = now_et.strftime("%H:%M ET")
 
+        # ── Step 1: new entries from cached pre-market scan ─────────────────
+        new_trades: list[TradeRecord] = []
+        cached = _load_scan_cache()
+        if cached:
+            executor   = TradeExecutor(cfg)
+            new_trades = executor.execute(cached)
+        else:
+            log.info("  No cached scan — skipping new-entry check.")
+
+        # ── Step 2: existing position checks ───────────────────────────────
         monitor = PositionMonitor(cfg)
         actions = monitor.scan()
 
-        # Send email only when there's an exit, trim, or new signal to flag
-        notable = [a for a in actions if a.action in ("exit", "trim", "hold")]
-        if notable:
-            subject, html = PositionMonitor._monitor_html(actions, date_str)
+        # ── Step 3: email when anything notable happened ────────────────────
+        notable_actions = [a for a in actions if a.action in ("exit", "trim", "hold")]
+        if new_trades or notable_actions:
+            # Build combined email
+            trade_rows = ""
+            if new_trades:
+                for t in new_trades:
+                    rr_cls = "ok" if t.rr >= 2.5 else "warn" if t.rr >= 1.5 else "no"
+                    trade_rows += f"""
+                    <tr>
+                      <td><b>{t.ticker}</b></td>
+                      <td>{t.qty}</td>
+                      <td>${t.price:.2f}</td>
+                      <td class="no">${t.stop:.2f}</td>
+                      <td class="ok">${t.target:.2f}</td>
+                      <td class="{rr_cls}">{t.rr}</td>
+                      <td style="color:#9e9e9e;font-size:11px">{t.strategy}</td>
+                    </tr>"""
+                trade_section = f"""
+                <h3>🚀 New Trades Executed</h3>
+                <table>
+                  <tr>
+                    <td style="color:#9e9e9e">Ticker</td>
+                    <td style="color:#9e9e9e">Qty</td>
+                    <td style="color:#9e9e9e">Entry</td>
+                    <td style="color:#9e9e9e">Stop</td>
+                    <td style="color:#9e9e9e">Target</td>
+                    <td style="color:#9e9e9e">R:R</td>
+                    <td style="color:#9e9e9e">Setup</td>
+                  </tr>{trade_rows}
+                </table>"""
+            else:
+                trade_section = ""
+
+            _, monitor_html_body = PositionMonitor._monitor_html(actions, date_str)
+            # Extract just the table from monitor html (reuse helper)
+            mon_rows = ""
+            for a in actions:
+                if a.action == "exit":
+                    cls, icon = "no",   "🚨 EXIT"
+                elif a.action == "trim":
+                    cls, icon = "warn", "✂️  TRIM"
+                elif a.action == "hold":
+                    cls, icon = "ok",   "⚡ SIGNAL"
+                else:
+                    continue
+                mon_rows += f"""
+                <tr>
+                  <td><b>{a.ticker}</b></td>
+                  <td class="{cls}">{icon}</td>
+                  <td>${a.price:.2f}</td>
+                  <td style="color:#b0bec5;font-size:12px">{a.reason}</td>
+                </tr>"""
+
+            monitor_section = ""
+            if mon_rows:
+                monitor_section = f"""
+                <h3>📡 Position Updates</h3>
+                <table>
+                  <tr>
+                    <td style="color:#9e9e9e">Ticker</td>
+                    <td style="color:#9e9e9e">Action</td>
+                    <td style="color:#9e9e9e">Price</td>
+                    <td style="color:#9e9e9e">Reason</td>
+                  </tr>{mon_rows}
+                </table>"""
+
+            html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+            <style>{_CSS}</style></head><body><div class="card">
+            <h2>⏱ 15-MIN UPDATE — {date_str} {time_str}</h2>
+            {trade_section}
+            {monitor_section}
+            <p class="foot">QQQ Swing Suite · Monitor · {now_et.strftime('%Y-%m-%d %H:%M ET')}</p>
+            </div></body></html>"""
+
+            n_t = len(new_trades)
+            n_a = len(notable_actions)
+            parts = []
+            if n_t: parts.append(f"{n_t} trade{'s' if n_t > 1 else ''}")
+            if n_a: parts.append(f"{n_a} position update{'s' if n_a > 1 else ''}")
+            subject = f"⏱ {' · '.join(parts)} — {time_str}"
             log.info(f"Subject: {subject}")
             mailer.send(subject, html)
         else:
-            log.info("Monitor: nothing to report — no email sent.")
+            log.info("Monitor: all clear — no action taken, no email sent.")
 
     else:
         print("Usage: python3 trading_bot.py [--premarket | --midday | --run | --trade | --monitor]")
