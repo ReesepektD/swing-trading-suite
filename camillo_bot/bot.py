@@ -27,9 +27,10 @@ from .database import Database
 from .executor import Executor
 from .notifier import EmailNotifier
 
-# Import scanner from parent directory
+# Import scanners from parent directory
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from camillo_social_arbitrage import SocialArbitrageScanner
+from markov_regime import MarkovHedgeScanner
 
 log = logging.getLogger(__name__)
 ET  = zoneinfo.ZoneInfo("America/New_York")
@@ -49,6 +50,7 @@ class CamilloBot:
                 "client_secret": config.reddit_client_secret,
             } if config.reddit_client_id else None
         )
+        self._markov = MarkovHedgeScanner()
 
     # ------------------------------------------------------------------
     # Core jobs
@@ -71,16 +73,30 @@ class CamilloBot:
             log.warning("Scan returned no results")
             return
 
-        # Filter to actionable signals
+        # Markov regime filter: build a set of tickers currently in Bull regime
+        try:
+            markov_results = self._markov.scan_watchlist(self.config.watchlist)
+            bull_tickers = set(
+                markov_results.loc[markov_results["Regime"] == "Bull", "Ticker"].tolist()
+            )
+            log.info("Markov Bull regime: %s", bull_tickers or "none")
+        except Exception as exc:
+            log.warning("Markov scan failed — proceeding without regime filter: %s", exc)
+            bull_tickers = None  # None = filter disabled
+
+        # Filter to actionable signals; skip if regime is Bear (not Bull or Sideways)
         buy_signals = []
         for _, row in results.iterrows():
             if row["Signal"] in ("BUY", "WATCH") and row["Composite"] >= self.config.min_buy_score:
-                # Reconstruct ArbitrageSignal from scan row
+                ticker = row["Ticker"]
+                if bull_tickers is not None and ticker not in bull_tickers:
+                    log.info("Skipping %s — Markov regime is not Bull", ticker)
+                    continue
                 item = next(
-                    (w for w in self.config.watchlist if w["ticker"] == row["Ticker"]), None
+                    (w for w in self.config.watchlist if w["ticker"] == ticker), None
                 )
                 if item:
-                    sig = self._scanner.score_ticker(row["Ticker"], item["keywords"])
+                    sig = self._scanner.score_ticker(ticker, item["keywords"])
                     buy_signals.append(sig)
 
         if buy_signals:
@@ -135,6 +151,23 @@ class CamilloBot:
                 self.notifier.send_daily_summary(positions, account.equity)
             except Exception as exc:
                 log.warning("Daily summary email failed: %s", exc)
+
+    def run_regime_scan(self):
+        """Print a Markov regime table for the full watchlist and exit."""
+        log.info("━━━ REGIME SCAN ━━━  %s", date.today().isoformat())
+        results = self._markov.scan_watchlist(self.config.watchlist)
+        if results.empty:
+            print("No regime results returned.")
+            return
+        print("\n" + "═" * 68)
+        print("  MARKOV REGIME SCAN")
+        print("═" * 68)
+        for _, row in results.iterrows():
+            icon = {"BUY": "●", "WATCH": "◐", "PASS": "○"}.get(row["Signal"], "?")
+            print(f"\n  {icon} {row['Ticker']:<6}  [{row['Signal']}]  "
+                  f"Score {row['Score']:.1f}  Regime: {row['Regime']}")
+            print(f"     {row['→Bull']} Bull  {row['→Bear']} Bear")
+        print("\n" + "═" * 68 + "\n")
 
     # ------------------------------------------------------------------
     # Scheduler loop

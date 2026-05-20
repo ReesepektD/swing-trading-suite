@@ -94,15 +94,14 @@ class Config:
             reddit_client_secret = os.getenv("REDDIT_CLIENT_SECRET", ""),
         )
 
-    def validate(self, mode: str = "paper"):
+    def validate(self):
         """Raise if any required fields are missing."""
         if not self.alpaca_api_key or not self.alpaca_secret_key:
             raise ValueError(
                 "ALPACA_API_KEY and ALPACA_SECRET_KEY must be set.\n"
                 "Get free paper trading keys at: https://alpaca.markets"
             )
-        if not self.paper_trading or mode == "live":
-            # Require an explicit second confirmation for live trading
+        if not self.paper_trading:
             confirm = os.getenv("CAMILLO_LIVE_CONFIRM", "")
             if confirm != "YES_USE_REAL_MONEY":
                 raise ValueError(

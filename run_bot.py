@@ -61,6 +61,7 @@ def main():
     parser.add_argument("--exit-check-now", action="store_true", help="Run one exit check and exit")
     parser.add_argument("--status",         action="store_true", help="Print portfolio summary and exit")
     parser.add_argument("--force",          action="store_true", help="Bypass market-hours check (for testing)")
+    parser.add_argument("--regime",         action="store_true", help="Run Markov regime scan on watchlist and exit")
     args = parser.parse_args()
 
     from camillo_bot.bot import build_bot
@@ -77,7 +78,10 @@ def main():
         sys.exit(1)
 
     try:
-        if args.scan_now:
+        if args.regime:
+            log.info("Running Markov regime scan (one-shot)...")
+            bot.run_regime_scan()
+        elif args.scan_now:
             log.info("Running scan now (one-shot)...")
             bot.run_scan(force=args.force)
         elif args.exit_check_now:

@@ -112,9 +112,9 @@ class EmailNotifier:
                   <td style="padding:10px 14px;font-weight:700;font-size:1rem;">{row.get('Ticker','')}</td>
                   <td style="padding:10px 14px;"><span style="background:{color};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.75rem;font-weight:700;">{sig}</span></td>
                   <td style="padding:10px 14px;font-weight:600;color:{color};">{score:.1f}</td>
-                  <td style="padding:10px 14px;color:#8892a4;">{row.get('TrendVel',0):.0f}</td>
+                  <td style="padding:10px 14px;color:#8892a4;">{row.get('Trend',0):.0f}</td>
                   <td style="padding:10px 14px;color:#8892a4;">{row.get('AnalystGap',0):.0f}</td>
-                  <td style="padding:10px 14px;color:#8892a4;">{row.get('RedditBuzz',0):.0f}</td>
+                  <td style="padding:10px 14px;color:#8892a4;">{row.get('Reddit',0):.0f}</td>
                   <td style="padding:10px 14px;color:#8892a4;">{row.get('PriceLag',0):.0f}</td>
                 </tr>"""
         else:
@@ -124,7 +124,6 @@ class EmailNotifier:
         pos_rows = ""
         if positions:
             for p in positions:
-                pct_held = ""
                 try:
                     from camillo_bot.yahoo_data import get_client
                     cur = get_client().get_price(p.ticker)
@@ -143,7 +142,7 @@ class EmailNotifier:
                   <td style="padding:10px 14px;">${p.entry_price:.2f}</td>
                   <td style="padding:10px 14px;">{cur_str}</td>
                   <td style="padding:10px 14px;color:{ret_color};font-weight:600;">{ret_str}</td>
-                  <td style="padding:10px 14px;color:#8892a4;">{p.score_at_entry:.0f}</td>
+                  <td style="padding:10px 14px;color:#8892a4;">{p.entry_score:.0f}</td>
                   <td style="padding:10px 14px;color:#8892a4;">{p.entry_date}</td>
                 </tr>"""
         else:
@@ -237,7 +236,7 @@ class EmailNotifier:
                 from camillo_bot.yahoo_data import get_client
                 cur = get_client().get_price(p.ticker)
                 ret = (cur / p.entry_price - 1) * 100
-                pl  = (cur - p.entry_price) * p.qty
+                pl  = (cur / p.entry_price - 1) * p.notional
                 total_pl += pl
                 pos_lines.append(f"{p.ticker:6s}  entry ${p.entry_price:.2f}  now ${cur:.2f}  {ret:+.1f}%  P&L ${pl:+.2f}")
             except Exception:

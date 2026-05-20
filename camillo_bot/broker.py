@@ -55,9 +55,6 @@ class BaseBroker(ABC):
     def get_account(self) -> AccountInfo: ...
 
     @abstractmethod
-    def get_positions(self) -> list: ...          # list[BrokerPosition]
-
-    @abstractmethod
     def get_price(self, ticker: str) -> float: ...
 
     @abstractmethod
@@ -103,19 +100,6 @@ class AlpacaBroker(BaseBroker):
             buying_power    = float(a.buying_power),
             portfolio_value = float(a.portfolio_value),
         )
-
-    def get_positions(self) -> list:
-        return [
-            BrokerPosition(
-                ticker          = p.symbol,
-                qty             = float(p.qty),
-                market_value    = float(p.market_value),
-                avg_cost        = float(p.avg_entry_price),
-                unrealized_pl   = float(p.unrealized_pl),
-                unrealized_plpc = float(p.unrealized_plpc),
-            )
-            for p in self._trading.get_all_positions()
-        ]
 
     def get_position(self, ticker: str) -> Optional[BrokerPosition]:
         try:
@@ -231,9 +215,6 @@ class DryRunBroker(BaseBroker):
             buying_power    = self._cash,
             portfolio_value = equity,
         )
-
-    def get_positions(self) -> list:
-        return list(self._positions.values())
 
     def get_position(self, ticker: str) -> Optional[BrokerPosition]:
         return self._positions.get(ticker)

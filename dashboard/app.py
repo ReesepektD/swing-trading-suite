@@ -74,7 +74,7 @@ def get_positions():
     try:
         conn = get_db()
         rows = conn.execute(
-            "SELECT * FROM positions ORDER BY score_at_entry DESC"
+            "SELECT * FROM positions ORDER BY entry_score DESC"
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
@@ -103,25 +103,31 @@ def enrich_with_live_prices(positions):
         tickers = [p["ticker"] for p in positions]
         quotes = ydc.get_quotes(tickers)
         for p in positions:
+            entry    = p.get("entry_price") or 0
+            notional = p.get("notional") or 0
+            qty      = notional / entry if entry > 0 else 0
+            p["qty"] = qty
             q = quotes.get(p["ticker"])
             if q:
-                p["current_price"] = q.last_price
-                p["change_pct"]    = round(q.change_pct * 100, 2)
-                entry = p.get("entry_price", 0) or 0
+                p["current_price"]  = q.last_price
+                p["change_pct"]     = round(q.change_pct * 100, 2)
                 if entry > 0:
                     p["unrealized_pct"] = round((q.last_price / entry - 1) * 100, 2)
-                    p["unrealized_pl"]  = round((q.last_price - entry) * (p.get("qty") or 0), 2)
+                    p["unrealized_pl"]  = round((q.last_price - entry) * qty, 2)
                 else:
                     p["unrealized_pct"] = 0
                     p["unrealized_pl"]  = 0
             else:
-                p["current_price"] = p.get("entry_price", 0)
-                p["change_pct"]    = 0
+                p["current_price"]  = entry
+                p["change_pct"]     = 0
                 p["unrealized_pct"] = 0
                 p["unrealized_pl"]  = 0
     except Exception as exc:
         for p in positions:
-            p["current_price"]  = p.get("entry_price", 0)
+            entry    = p.get("entry_price") or 0
+            notional = p.get("notional") or 0
+            p["qty"]            = notional / entry if entry > 0 else 0
+            p["current_price"]  = entry
             p["change_pct"]     = 0
             p["unrealized_pct"] = 0
             p["unrealized_pl"]  = 0
@@ -527,7 +533,7 @@ function renderTop3(top3) {
     const uPct  = p.unrealized_pct ?? 0;
     const uPl   = p.unrealized_pl  ?? 0;
     const cur   = p.current_price  ?? p.entry_price ?? 0;
-    const score = p.score_at_entry ?? 0;
+    const score = p.entry_score ?? 0;
     const weeks = p.entry_date ? Math.floor((Date.now()/86400000 - new Date(p.entry_date).getTime()/86400000) / 7) : 0;
     const barW  = Math.min(score, 100);
     const barColor = scoreColor(score);
@@ -662,12 +668,13 @@ function renderLog(log) {
     return;
   }
   el.innerHTML = log.map(t => {
-    const isBuy = (t.side || '').toLowerCase() === 'buy';
+    const isBuy = (t.action || '') === 'ENTRY';
+    const shares = (t.price > 0 && t.notional > 0) ? (t.notional / t.price).toFixed(4) : '—';
     return `
     <div class="log-row">
-      <span class="log-side" style="color:${isBuy ? 'var(--green)' : 'var(--red)'};">${(t.side||'').toUpperCase()}</span>
+      <span class="log-side" style="color:${isBuy ? 'var(--green)' : 'var(--red)'};">${(t.action||'').replace(/_/g,' ')}</span>
       <span class="log-ticker">${t.ticker}</span>
-      <span>${t.qty ? parseFloat(t.qty).toFixed(4) : '—'} sh</span>
+      <span>${shares} sh</span>
       <span>@ $${t.price ? parseFloat(t.price).toFixed(2) : '—'}</span>
       <span class="log-reason">${(t.reason||'').replace(/_/g,' ')}</span>
       <span class="log-ts">${(t.timestamp||'').slice(0,16)}</span>

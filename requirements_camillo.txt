@@ -8,3 +8,7 @@ matplotlib>=3.7.0
 
 # Bot dependencies
 alpaca-py>=0.20.0
+
+# Markov regime detection (markov-hedge-fund-method skill)
+hmmlearn>=0.3.0         # optional — graceful degrade if not installed
+scikit-learn>=1.4.0
