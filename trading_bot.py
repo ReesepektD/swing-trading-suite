@@ -122,6 +122,53 @@ def _load_scan_cache() -> list[_CachedSetup]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# NO-REENTRY LIST  — tickers stopped out today; reset each trading day
+# ─────────────────────────────────────────────────────────────────────────────
+NO_REENTRY_PATH = "/tmp/qqq_no_reentry.json"
+
+
+def _add_no_reentry(ticker: str) -> None:
+    """Blacklist a ticker for the rest of today after a stop/exit."""
+    try:
+        today  = datetime.now(pytz.timezone("America/New_York")).date().isoformat()
+        data   = _load_no_reentry_raw()
+        if ticker not in data.get("tickers", []):
+            data.setdefault("tickers", []).append(ticker)
+        data["date"] = today
+        with open(NO_REENTRY_PATH, "w") as fh:
+            json.dump(data, fh)
+        log.info(f"No-reentry: {ticker} blacklisted for today ({today})")
+    except Exception as e:
+        log.warning(f"Could not update no-reentry list: {e}")
+
+
+def _load_no_reentry_raw() -> dict:
+    try:
+        with open(NO_REENTRY_PATH) as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+
+
+def _load_no_reentry() -> set:
+    """Return set of tickers blocked from new entries today."""
+    try:
+        today = datetime.now(pytz.timezone("America/New_York")).date().isoformat()
+        data  = _load_no_reentry_raw()
+        if data.get("date") != today:
+            return set()   # stale — different trading day
+        blocked = set(data.get("tickers", []))
+        if blocked:
+            log.info(f"No-reentry list: {', '.join(sorted(blocked))}")
+        return blocked
+    except Exception as e:
+        log.warning(f"Could not load no-reentry list: {e}")
+        return set()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 @dataclass
@@ -1209,6 +1256,8 @@ class TradeExecutor:
         open_count = self._open_position_count()
         log.info(f"TradeExecutor: {open_count} positions open, max={self.MAX_POSITIONS}")
 
+        no_reentry = _load_no_reentry()
+
         portfolio = 100_000.0   # fallback for dry-run
         if self.broker:
             try:
@@ -1241,6 +1290,11 @@ class TradeExecutor:
             # Filter: already in position
             if self._already_in(ticker):
                 log.info(f"  {ticker}: already have position — skip.")
+                continue
+
+            # Filter: stopped out earlier today — no re-entry same day
+            if ticker in no_reentry:
+                log.info(f"  {ticker}: on no-reentry list (stopped out today) — skip.")
                 continue
 
             # Size order
@@ -1477,6 +1531,7 @@ class PositionMonitor:
                     reason = f"Stop hit: ${cur_price:.2f} ≤ ${stop:.2f}"
                     log.info(f"  → EXIT ({reason})")
                     self._exit(symbol, qty)
+                    _add_no_reentry(symbol)
                     actions.append(MonitorAction(symbol, "exit", reason, cur_price, qty))
                     continue
 
@@ -1486,6 +1541,7 @@ class PositionMonitor:
                     reason = f"Exit signal: {exit_s.reason}"
                     log.info(f"  → EXIT ({reason})")
                     self._exit(symbol, qty)
+                    _add_no_reentry(symbol)
                     actions.append(MonitorAction(symbol, "exit", reason, cur_price, qty))
                     continue
 
