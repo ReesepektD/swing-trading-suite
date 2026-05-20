@@ -26,6 +26,7 @@ import json
 import logging
 import sys
 import os
+from datetime import date, datetime
 
 # Allow running from repo root or tradingview/ subdirectory
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -75,9 +76,9 @@ def _handle_signal(payload: dict[str, Any]) -> tuple[int, str]:
             return 400, "missing 'ticker' for action=scan"
         log.info("TV alert: SCAN %s (price=%s)", ticker, price)
         try:
-            from camillo_social_arbitrage import SocialArbitrageScanner, WATCHLIST
+            from camillo_social_arbitrage import SocialArbitrageScanner, SAMPLE_WATCHLIST
             # Build a one-ticker watchlist using the default keywords if known
-            known = {w["ticker"]: w for w in WATCHLIST}
+            known = {w["ticker"]: w for w in SAMPLE_WATCHLIST}
             entry = known.get(ticker, {"ticker": ticker, "keywords": [ticker.lower()]})
             scanner = SocialArbitrageScanner()
             sig = scanner.score_ticker(entry["ticker"], entry["keywords"])
@@ -100,7 +101,7 @@ def _handle_signal(payload: dict[str, Any]) -> tuple[int, str]:
         try:
             account  = _bot.broker.get_account()
             from camillo_bot.risk import size_order
-            from camillo_bot.database import DBPosition
+            from camillo_bot.database import DBPosition, TradeLog
             n_pos = len(_bot.db.get_all_positions())
             sizing = size_order(
                 ticker         = ticker,
@@ -114,18 +115,18 @@ def _handle_signal(payload: dict[str, Any]) -> tuple[int, str]:
                 return 200, f"position skipped (max positions or order too small)"
             order = _bot.broker.place_buy(ticker, sizing.notional)
             fill_price = order.filled_avg_price or (price or 0)
+            today = date.today().isoformat()
             _bot.db.save_position(DBPosition(
-                ticker          = ticker,
-                entry_price     = float(fill_price),
-                entry_date      = str(__import__("datetime").date.today()),
-                qty             = order.qty or 0,
-                notional        = sizing.notional,
-                signal          = "BUY",
-                score_at_entry  = 75.0,
-                half_taken      = False,
+                ticker           = ticker,
+                entry_price      = float(fill_price),
+                entry_date       = today,
+                notional         = sizing.notional,
+                keywords         = [ticker.lower()],
+                entry_score      = 75.0,
+                signal           = "BUY",
+                half_taken       = False,
                 last_trend_score = 75.0,
-                last_trend_check = str(__import__("datetime").date.today()),
-                source          = "tradingview",
+                last_trend_check = today,
             ))
             return 200, f"bought {ticker} ${sizing.notional:.2f} @ ${fill_price}"
         except Exception as exc:
@@ -145,8 +146,17 @@ def _handle_signal(payload: dict[str, Any]) -> tuple[int, str]:
             if broker_pos:
                 _bot.broker.place_sell(ticker, broker_pos.qty)
             _bot.db.close_position(ticker)
-            _bot.db.log_trade(ticker, "sell", broker_pos.qty if broker_pos else 0,
-                              float(price or 0), "tradingview_exit")
+            from camillo_bot.database import TradeLog
+            exit_price = float(price or (broker_pos.avg_cost if broker_pos else 0))
+            _bot.db.log_trade(TradeLog(
+                ticker    = ticker,
+                action    = "EXIT",
+                reason    = "tradingview_exit",
+                price     = exit_price,
+                notional  = broker_pos.market_value if broker_pos else 0.0,
+                score     = 0.0,
+                timestamp = datetime.now().isoformat(),
+            ))
             return 200, f"closed position in {ticker}"
         except Exception as exc:
             log.exception("Exit failed for %s", ticker)

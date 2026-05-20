@@ -124,7 +124,6 @@ class EmailNotifier:
         pos_rows = ""
         if positions:
             for p in positions:
-                pct_held = ""
                 try:
                     from camillo_bot.yahoo_data import get_client
                     cur = get_client().get_price(p.ticker)

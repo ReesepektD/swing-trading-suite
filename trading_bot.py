@@ -18,7 +18,6 @@ import os
 import json
 import logging
 import smtplib
-import textwrap
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from email.mime.multipart import MIMEMultipart
