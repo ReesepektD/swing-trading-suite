@@ -2,4 +2,5 @@ yfinance>=0.2.40
 pandas>=2.0.0
 numpy>=1.26.0
 pytz>=2024.1
+hmmlearn>=0.3.0           # Markov regime detection
 alpaca-trade-api>=3.0.0   # optional — only needed for live/paper execution

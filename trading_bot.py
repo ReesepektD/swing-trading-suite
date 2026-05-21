@@ -36,6 +36,13 @@ try:
 except ImportError:
     ALPACA_AVAILABLE = False
 
+# ── Optional: Markov regime (hmmlearn) ────────────────────────────────────────
+try:
+    from hmmlearn.hmm import GaussianHMM
+    _HMM_OK = True
+except ImportError:
+    _HMM_OK = False
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -53,17 +60,21 @@ def _save_scan_cache(results: list) -> None:
     """Serialise ScanResult list to JSON so the 15-min monitor can reuse it."""
     try:
         data = [{
-            "ticker":    r.ticker,
-            "score":     r.score,
-            "price":     r.price,
-            "stop":      r.stop,
-            "target":    r.target,
-            "tt_score":  r.tt_score,
-            "stage":     r.stage,
-            "rsi":       r.rsi,
-            "signals":   [s.strategy for s in r.signals],
-            "vol_surge": r.vol_surge,
-            "ts":        datetime.now().isoformat(),
+            "ticker":       r.ticker,
+            "score":        r.score,
+            "price":        r.price,
+            "stop":         r.stop,
+            "target":       r.target,
+            "tt_score":     r.tt_score,
+            "stage":        r.stage,
+            "rsi":          r.rsi,
+            "signals":      [s.strategy for s in r.signals],
+            "vol_surge":    r.vol_surge,
+            "regime":       r.regime.regime   if r.regime else "Unknown",
+            "regime_bull_p":r.regime.bull_p   if r.regime else 0.0,
+            "regime_neut_p":r.regime.neut_p   if r.regime else 0.0,
+            "regime_bear_p":r.regime.bear_p   if r.regime else 0.0,
+            "ts":           datetime.now().isoformat(),
         } for r in results]
         with open(SCAN_CACHE_PATH, "w") as fh:
             json.dump(data, fh)
@@ -75,7 +86,7 @@ def _save_scan_cache(results: list) -> None:
 class _CachedSetup:
     """Lightweight stand-in for ScanResult built from cached JSON data."""
     __slots__ = ("ticker","score","price","stop","target","tt_score",
-                 "stage","rsi","vol_surge","_sigs","ts")
+                 "stage","rsi","vol_surge","_sigs","ts","regime")
 
     def __init__(self, d: dict):
         self.ticker    = d["ticker"]
@@ -89,6 +100,12 @@ class _CachedSetup:
         self.vol_surge = d["vol_surge"]
         self._sigs     = d.get("signals", [])
         self.ts        = d.get("ts", "")
+        self.regime    = RegimeResult(
+            regime = d.get("regime", "Unknown"),
+            bull_p = d.get("regime_bull_p", 0.0),
+            neut_p = d.get("regime_neut_p", 0.0),
+            bear_p = d.get("regime_bear_p", 0.0),
+        )
 
     def signal_names(self) -> str:
         return " · ".join(self._sigs)
@@ -346,6 +363,105 @@ class Indicators:
         df["tp"] = c + df["atr"] * cfg.atr_tp_mult
 
         self.df = df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MARKOV REGIME DETECTION
+# ─────────────────────────────────────────────────────────────────────────────
+@dataclass
+class RegimeResult:
+    regime:  str    # "Bull" | "Neutral" | "Bear" | "Unknown"
+    bull_p:  float  # probability of bull state  (0–1)
+    neut_p:  float  # probability of neutral state
+    bear_p:  float  # probability of bear state
+
+    def is_bull(self)    -> bool: return self.regime == "Bull"
+    def is_bear(self)    -> bool: return self.regime == "Bear"
+    def is_neutral(self) -> bool: return self.regime == "Neutral"
+
+    def css_class(self) -> str:
+        return "ok" if self.is_bull() else "no" if self.is_bear() else "warn"
+
+    def emoji(self) -> str:
+        return "🟢" if self.is_bull() else "🔴" if self.is_bear() else "🟡"
+
+    def prob_str(self) -> str:
+        """Human-readable probability breakdown."""
+        return f"Bull {self.bull_p*100:.0f}%  Neut {self.neut_p*100:.0f}%  Bear {self.bear_p*100:.0f}%"
+
+
+def detect_regime(df: pd.DataFrame, n_states: int = 3) -> RegimeResult:
+    """
+    Fit a Gaussian HMM to (log returns, 5-day realised vol) on the supplied
+    daily OHLCV DataFrame and return the current market regime.
+
+    States are auto-labelled Bear / Neutral / Bull by ascending mean return.
+    Falls back to SMA200 slope when hmmlearn is not installed or the fit fails.
+    """
+    def _sma_fallback(df: pd.DataFrame) -> RegimeResult:
+        close  = df["Close"].dropna()
+        sma200 = close.rolling(200).mean().dropna()
+        if len(sma200) < 10:
+            return RegimeResult("Unknown", 0.0, 0.0, 0.0)
+        above  = float(close.iloc[-1]) > float(sma200.iloc[-1])
+        slope  = float(sma200.iloc[-1]) - float(sma200.iloc[-10])
+        if above and slope > 0:
+            return RegimeResult("Bull",    1.0, 0.0, 0.0)
+        if not above and slope < 0:
+            return RegimeResult("Bear",    0.0, 0.0, 1.0)
+        return RegimeResult("Neutral",     0.0, 1.0, 0.0)
+
+    if not _HMM_OK:
+        return _sma_fallback(df)
+
+    try:
+        close   = df["Close"].dropna()
+        log_ret = np.log(close / close.shift(1)).dropna()
+        rvol    = log_ret.rolling(5).std().dropna()
+
+        obs = pd.DataFrame({"r": log_ret, "v": rvol}).dropna().values
+        if len(obs) < 60:
+            return _sma_fallback(df)
+
+        model = GaussianHMM(
+            n_components    = n_states,
+            covariance_type = "diag",
+            n_iter          = 100,
+            random_state    = 42,
+            tol             = 1e-4,
+        )
+        model.fit(obs)
+
+        hidden  = model.predict(obs)          # state sequence
+        proba   = model.predict_proba(obs)    # shape (T, n_states)
+        last_p  = proba[-1]                   # probabilities for today
+
+        # Identify which state is Bull / Neutral / Bear by mean return
+        ret_arr = log_ret.values[-len(hidden):]
+        mean_r  = {}
+        for s in range(n_states):
+            vals = ret_arr[hidden == s]
+            mean_r[s] = float(vals.mean()) if len(vals) > 0 else 0.0
+        ordered = sorted(mean_r, key=mean_r.get)   # ascending: Bear → … → Bull
+
+        if n_states == 3:
+            label = {ordered[0]: "Bear", ordered[1]: "Neutral", ordered[2]: "Bull"}
+        else:
+            label = {ordered[0]: "Bear", ordered[1]: "Bull"}
+
+        current  = label[int(hidden[-1])]
+        bull_p = neut_p = bear_p = 0.0
+        for s, p in enumerate(last_p):
+            lbl = label.get(s, "Neutral")
+            if lbl == "Bull":    bull_p = float(p)
+            elif lbl == "Neutral": neut_p = float(p)
+            elif lbl == "Bear":  bear_p = float(p)
+
+        return RegimeResult(current, bull_p, neut_p, bear_p)
+
+    except Exception as e:
+        log.debug(f"HMM fit failed ({e}) — using SMA fallback")
+        return _sma_fallback(df)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -971,6 +1087,7 @@ class ScanResult:
     rsi:      float
     signals:  list
     vol_surge:bool
+    regime:   Optional[RegimeResult] = None
 
     def signal_names(self) -> str:
         return " · ".join(s.strategy for s in self.signals)
@@ -1133,15 +1250,22 @@ class MarketScanner:
                 if exit_s or not sigs:
                     continue
 
+                # Markov regime — only computed for tickers that passed signal filter
+                regime = detect_regime(df)
+                if regime.is_bear():
+                    log.debug(f"  {ticker}: Bear regime — skip.")
+                    continue
+
                 r     = ind.df.iloc[-1]
                 stage = "2-Bull" if r["stage2"] else "4-Bear" if r["stage4"] else "1/3"
 
                 score = (
                     int(r["tt_score"]) * 2 +
                     len(sigs) * 3 +
-                    (2 if r["stage2"]    else 0) +
-                    (1 if r["vol_surge"] else 0) +
-                    (1 if r["macd_bull"] else 0)
+                    (2 if r["stage2"]        else 0) +
+                    (1 if r["vol_surge"]     else 0) +
+                    (1 if r["macd_bull"]     else 0) +
+                    (2 if regime.is_bull()   else 0)   # +2 Markov bull regime
                 )
 
                 results.append(ScanResult(
@@ -1155,6 +1279,7 @@ class MarketScanner:
                     rsi       = float(r["rsi"]),
                     signals   = sigs,
                     vol_surge = bool(r["vol_surge"]),
+                    regime    = regime,
                 ))
             except Exception:
                 continue
@@ -1635,6 +1760,7 @@ class ReportBuilder:
         self.date    = self.df.index[-1].strftime("%A, %B %d %Y")
         self.scanner = PreMarketScanner()
         self.mkt_scanner = MarketScanner(cfg)
+        self.regime  = detect_regime(self.df)   # QQQ Markov regime
 
     # ── top 5 market scan section ─────────────────────────────────────────────
     @staticmethod
@@ -1643,22 +1769,30 @@ class ReportBuilder:
             return '<div class="rule">No qualifying setups found in today\'s scan.</div>'
         rows = ""
         for r in results:
-            stage_cls = "ok" if r.stage == "2-Bull" else "no" if r.stage == "4-Bear" else "warn"
-            vol_cls   = "ok" if r.vol_surge else "neu"
+            stage_cls  = "ok" if r.stage == "2-Bull" else "no" if r.stage == "4-Bear" else "warn"
+            vol_cls    = "ok" if r.vol_surge else "neu"
+            reg        = r.regime
+            reg_cls    = reg.css_class()  if reg else "neu"
+            reg_txt    = f"{reg.emoji()} {reg.regime}" if reg else "—"
+            reg_tip    = reg.prob_str()   if reg else ""
             rows += f"""
             <tr>
               <td><b>{r.ticker}</b></td>
               <td>${r.price:.2f}</td>
               <td class="{stage_cls}">{r.stage}</td>
               <td class="{'ok' if r.tt_score >= 6 else 'warn'}">{r.tt_score}/7</td>
+              <td class="{reg_cls}" title="{reg_tip}">{reg_txt}</td>
               <td class="{vol_cls}">{'✔' if r.vol_surge else '—'}</td>
               <td style="color:#b0bec5;font-size:11px">{r.signal_names()}</td>
             </tr>
             <tr>
-              <td colspan="2" style="color:#9e9e9e;font-size:11px">
+              <td colspan="3" style="color:#9e9e9e;font-size:11px">
                 Stop ${r.stop:.2f} · Target ${r.target:.2f} · R:R {r.rr()}
               </td>
-              <td colspan="4" style="color:#9e9e9e;font-size:11px">RSI {r.rsi:.1f} · Score {r.score}</td>
+              <td colspan="4" style="color:#9e9e9e;font-size:11px">
+                RSI {r.rsi:.1f} · Score {r.score}
+                {('· ' + reg_tip) if reg_tip else ''}
+              </td>
             </tr>"""
         return f"""
         <table>
@@ -1667,6 +1801,7 @@ class ReportBuilder:
             <td style="color:#9e9e9e">Price</td>
             <td style="color:#9e9e9e">Stage</td>
             <td style="color:#9e9e9e">TT</td>
+            <td style="color:#9e9e9e">Regime</td>
             <td style="color:#9e9e9e">Vol</td>
             <td style="color:#9e9e9e">Signals</td>
           </tr>
@@ -1793,9 +1928,13 @@ class ReportBuilder:
         chg    = ((r["Close"] - self.prev["Close"]) / self.prev["Close"]) * 100
         chg_cls= "ok" if chg >= 0 else "no"
 
+        reg = self.regime
         return f"""
         <tr><td>Last Close</td>
             <td>${r['Close']:.2f} <span class="{chg_cls}">({chg:+.2f}%)</span></td></tr>
+        <tr><td>Markov Regime</td>
+            <td class="{reg.css_class()}">{reg.emoji()} {reg.regime}
+            <span style="color:#9e9e9e;font-size:11px"> — {reg.prob_str()}</span></td></tr>
         <tr><td>Trend Template</td>
             <td class="{_score_class(score)}">{score}/7</td></tr>
         <tr><td>Stage (Weinstein)</td>
