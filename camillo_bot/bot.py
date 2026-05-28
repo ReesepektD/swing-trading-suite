@@ -80,6 +80,18 @@ class CamilloBot:
                 markov_results.loc[markov_results["Regime"] == "Bull", "Ticker"].tolist()
             )
             log.info("Markov Bull regime: %s", bull_tickers or "none")
+
+            # Print regime table inline
+            icons = {"BUY": "●", "WATCH": "◐", "PASS": "○"}
+            print(f"\n{'─'*60}")
+            print("  REGIME (Markov)")
+            print(f"{'─'*60}")
+            for _, r in markov_results.iterrows():
+                icon  = icons.get(r["Signal"], "?")
+                badge = "✓ Bull" if r["Regime"] == "Bull" else ("✗ Bear" if r["Regime"] == "Bear" else "~ Sideways")
+                print(f"  {icon} {r['Ticker']:<6}  {badge:<12}  "
+                      f"Score {r['Score']:.1f}  →Bull {r['→Bull']}  →Bear {r['→Bear']}")
+            print(f"{'─'*60}\n")
         except Exception as exc:
             log.warning("Markov scan failed — proceeding without regime filter: %s", exc)
             bull_tickers = None  # None = filter disabled

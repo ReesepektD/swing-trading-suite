@@ -22,8 +22,6 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from camillo_bot.yahoo_data import get_client
-
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -124,6 +122,7 @@ class MarkovHedgeScanner:
     def score_ticker(self, ticker: str, keywords: list | None = None) -> RegimeSignal:
         keywords = keywords or [ticker.lower()]
         try:
+            from camillo_bot.yahoo_data import get_client
             hist = get_client().get_history(ticker, period=self.history_period)
             if hist.empty:
                 raise ValueError(f"No history returned for {ticker}")

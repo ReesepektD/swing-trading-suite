@@ -136,19 +136,25 @@ class SocialArbitrageScanner:
         """
         kws = keywords[:5]
         df  = pd.DataFrame()
-        for attempt in range(4):
+        max_attempts = 3
+        for attempt in range(max_attempts):
             try:
-                time.sleep(random.uniform(3, 6) * (attempt + 1))
+                time.sleep(random.uniform(2, 4))
                 self.pytrends.build_payload(kws, timeframe=TREND_TIMEFRAME)
                 df = self.pytrends.interest_over_time()
                 break
             except Exception as e:
-                if attempt == 3:
-                    print(f"      Trend error after retries: {e}")
+                is_last = attempt == max_attempts - 1
+                if "429" in str(e) or "response with code 429" in str(e).lower():
+                    if is_last:
+                        log.warning("Trend rate-limited for %s — skipping (score=0)", kws[0])
+                        return 0.0, pd.DataFrame()
+                    backoff = (2 ** attempt) * random.uniform(10, 20)
+                    print(f"      Trend 429, retrying in {backoff:.0f}s...")
+                    time.sleep(backoff)
+                else:
+                    log.warning("Trend error for %s: %s", kws[0], e)
                     return 0.0, pd.DataFrame()
-                backoff = (2 ** attempt) * random.uniform(8, 15)
-                print(f"      Trend 429, retrying in {backoff:.0f}s...")
-                time.sleep(backoff)
         if df.empty:
             return 0.0, pd.DataFrame()
 
