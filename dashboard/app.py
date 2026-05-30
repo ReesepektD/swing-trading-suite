@@ -775,8 +775,8 @@ def start_ngrok(port: int) -> str:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port",   type=int, default=5050)
-    parser.add_argument("--host",   default="127.0.0.1")
+    parser.add_argument("--port",   type=int, default=int(os.getenv("PORT", 5050)))
+    parser.add_argument("--host",   default="0.0.0.0")
     parser.add_argument("--public", action="store_true",
                         help="Expose dashboard publicly via ngrok and set CAMILLO_DASHBOARD_URL")
     args = parser.parse_args()

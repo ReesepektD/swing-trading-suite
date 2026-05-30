@@ -31,6 +31,13 @@ from datetime import date, datetime
 # Allow running from repo root or tradingview/ subdirectory
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+# Load credentials from .env so ALPACA_API_KEY etc. are available
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+except Exception:
+    pass
+
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
@@ -229,7 +236,7 @@ def main():
     global _bot, _secret
 
     parser = argparse.ArgumentParser(description="TradingView webhook → Camillo bot")
-    parser.add_argument("--port",   type=int, default=8765, help="Port to listen on (default 8765)")
+    parser.add_argument("--port",   type=int, default=int(os.getenv("PORT", 8765)), help="Port to listen on (default 8765)")
     parser.add_argument("--host",   default="0.0.0.0",      help="Bind address (default 0.0.0.0)")
     parser.add_argument("--mode",   choices=["dry", "paper", "live"], default="paper",
                         help="Broker mode (default paper)")
