@@ -67,6 +67,7 @@ class ArbitrageSignal:
     composite_score:      float = 0.0
     signal:               str   = "PASS"
     notes:                list  = field(default_factory=list)
+    trend_available:      bool  = True   # False when Google Trends returned 429
 
     @property
     def tier_guidance(self) -> str:
@@ -147,16 +148,16 @@ class SocialArbitrageScanner:
                 is_last = attempt == max_attempts - 1
                 if "429" in str(e) or "response with code 429" in str(e).lower():
                     if is_last:
-                        log.warning("Trend rate-limited for %s — skipping (score=0)", kws[0])
-                        return 0.0, pd.DataFrame()
+                        log.warning("Trend rate-limited for %s — score will be rescaled", kws[0])
+                        return None, pd.DataFrame()   # None = rate-limited, not zero trend
                     backoff = (2 ** attempt) * random.uniform(10, 20)
                     print(f"      Trend 429, retrying in {backoff:.0f}s...")
                     time.sleep(backoff)
                 else:
                     log.warning("Trend error for %s: %s", kws[0], e)
-                    return 0.0, pd.DataFrame()
+                    return None, pd.DataFrame()
         if df.empty:
-            return 0.0, pd.DataFrame()
+            return None, pd.DataFrame()
 
         try:
             # Use the primary keyword column
@@ -360,8 +361,14 @@ class SocialArbitrageScanner:
         sig = ArbitrageSignal(ticker=ticker, keywords=keywords)
         print(f"  Scanning {ticker}...")
 
-        # 1. Google Trend velocity
-        sig.trend_velocity_score, trend_df = self.get_trend_velocity(keywords)
+        # 1. Google Trend velocity (None = rate-limited, not a real zero)
+        raw_trend, trend_df = self.get_trend_velocity(keywords)
+        if raw_trend is None:
+            sig.trend_available      = False
+            sig.trend_velocity_score = 0.0
+            sig.notes.append("Trend: unavailable (rate-limited)")
+        else:
+            sig.trend_velocity_score = raw_trend
 
         # 2. Analyst gap
         sig.analyst_gap_score, ameta = self.get_analyst_gap_score(ticker)
@@ -381,14 +388,28 @@ class SocialArbitrageScanner:
         if "price_3mo_pct" in pmeta:
             sig.notes.append(f"Price 3mo: {pmeta['price_3mo_pct']:+.1f}%")
 
-        # Composite
-        sig.composite_score = round(
-            sig.trend_velocity_score * SCORE_WEIGHTS["trend_velocity"]
-            + sig.analyst_gap_score  * SCORE_WEIGHTS["analyst_gap"]
-            + sig.reddit_buzz_score  * SCORE_WEIGHTS["reddit_buzz"]
-            + sig.price_lag_score    * SCORE_WEIGHTS["price_lag"],
-            1,
-        )
+        # Composite — rescale weights when trend data is unavailable so the
+        # other three factors still sum to 100% (prevents artificial score cap).
+        if sig.trend_available:
+            w = SCORE_WEIGHTS
+            sig.composite_score = round(
+                sig.trend_velocity_score * w["trend_velocity"]
+                + sig.analyst_gap_score  * w["analyst_gap"]
+                + sig.reddit_buzz_score  * w["reddit_buzz"]
+                + sig.price_lag_score    * w["price_lag"],
+                1,
+            )
+        else:
+            # Drop trend weight; redistribute proportionally across remaining factors
+            non_trend_total = (SCORE_WEIGHTS["analyst_gap"]
+                               + SCORE_WEIGHTS["reddit_buzz"]
+                               + SCORE_WEIGHTS["price_lag"])
+            sig.composite_score = round(
+                sig.analyst_gap_score  * (SCORE_WEIGHTS["analyst_gap"]  / non_trend_total)
+                + sig.reddit_buzz_score  * (SCORE_WEIGHTS["reddit_buzz"]   / non_trend_total)
+                + sig.price_lag_score    * (SCORE_WEIGHTS["price_lag"]     / non_trend_total),
+                1,
+            )
 
         # Signal
         if   sig.composite_score >= 70: sig.signal = "BUY"

@@ -73,6 +73,16 @@ class CamilloBot:
             log.warning("Scan returned no results")
             return
 
+        # Print social score breakdown so we can see why tickers pass/fail
+        print(f"\n{'─'*72}")
+        print(f"  {'TICKER':<6}  {'SIG':<5}  {'TOTAL':>5}  {'TREND':>5}  {'ANLYST':>6}  {'REDDIT':>6}  {'LAG':>5}")
+        print(f"{'─'*72}")
+        for _, row in results.iterrows():
+            trend_str = f"{row['Trend']:>5.1f}" if row.get('Trend', 0) > 0 else "  n/a"
+            print(f"  {row['Ticker']:<6}  {row['Signal']:<5}  {row['Composite']:>5.1f}"
+                  f"  {trend_str}  {row['AnalystGap']:>6.1f}  {row['Reddit']:>6.1f}  {row['PriceLag']:>5.1f}")
+        print(f"{'─'*72}\n")
+
         # Markov regime filter: build a set of tickers currently in Bull regime
         try:
             markov_results = self._markov.scan_watchlist(self.config.watchlist)
