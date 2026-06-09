@@ -565,18 +565,20 @@ class DividendKingScanner:
 
     # --- Data fetchers ---
 
-    def _fetch_history(self, ticker: str) -> Optional[pd.DataFrame]:
+    def _fetch_history(self, tk: yf.Ticker) -> Optional[pd.DataFrame]:
         try:
-            hist = yf.Ticker(ticker).history(period="2y")
-            return hist if len(hist) >= 30 else None
+            hist = tk.history(period="2y")
+            if hist is None or hist.empty or len(hist) < 30:
+                return None
+            return hist
         except Exception as e:
-            log.warning("History fetch failed for %s: %s", ticker, e)
+            log.warning("History fetch failed for %s: %s", tk.ticker, e)
             return None
 
-    def _fetch_dividend_metrics(self, ticker: str) -> Optional[DividendMetrics]:
+    def _fetch_dividend_metrics(self, tk: yf.Ticker) -> Optional[DividendMetrics]:
         try:
-            tk   = yf.Ticker(ticker)
-            info = tk.info or {}
+            ticker = tk.ticker
+            info   = tk.info or {}
 
             current_yield     = float(info.get("dividendYield", 0) or 0) * 100
             five_yr_avg_yield = float(info.get("fiveYearAvgDividendYield", 0) or 0)
@@ -594,7 +596,11 @@ class DividendKingScanner:
 
             divs = tk.dividends
             if divs is not None and len(divs) >= 8:
-                annual = divs.resample("YE").sum()
+                # Strip timezone before resampling to avoid tz-aware index issues
+                divs_naive = divs.copy()
+                if divs_naive.index.tz is not None:
+                    divs_naive.index = divs_naive.index.tz_localize(None)
+                annual = divs_naive.resample("YE").sum()
                 vals   = annual.values
 
                 if len(vals) >= 2 and vals[-2] > 0:
@@ -614,7 +620,7 @@ class DividendKingScanner:
                 consecutive_yrs = max(consecutive_yrs, 25)  # floor at aristocrat level
 
             return DividendMetrics(
-                ticker=ticker,
+                ticker=tk.ticker,
                 current_yield_pct=current_yield,
                 five_yr_avg_yield_pct=five_yr_avg_yield,
                 payout_ratio=payout_ratio,
@@ -633,8 +639,9 @@ class DividendKingScanner:
     def score_ticker(self, ticker: str) -> Optional[DividendKingSignal]:
         log.info("Scoring %-6s ...", ticker)
 
-        hist    = self._fetch_history(ticker)
-        metrics = self._fetch_dividend_metrics(ticker)
+        tk      = yf.Ticker(ticker)  # create once; both fetchers reuse the same object
+        hist    = self._fetch_history(tk)
+        metrics = self._fetch_dividend_metrics(tk)
 
         if hist is None or metrics is None:
             return None
@@ -771,7 +778,8 @@ class DKExecutor:
 
     def execute_entries(self, signals: list[DividendKingSignal],
                         positions: dict[str, DKPosition]):
-        equity    = self.broker.get_account_equity()
+        total_equity     = self.broker.get_account_equity()
+        committed_this_scan = 0.0
         buy_sigs  = [s for s in signals
                      if s.signal == "BUY" and s.ticker not in positions]
 
@@ -780,7 +788,9 @@ class DKExecutor:
                 log.info("Max positions (%d) reached.", self.cfg.max_positions)
                 break
 
-            notional = self.risk.position_size(equity, sig.composite_score, sig.signal)
+            # Subtract already-committed notional so sizing stays within bounds
+            available_equity = max(0.0, total_equity - committed_this_scan)
+            notional = self.risk.position_size(available_equity, sig.composite_score, sig.signal)
             if notional < 100:
                 log.warning("%s: notional $%.2f too small, skipping.", sig.ticker, notional)
                 continue
@@ -798,6 +808,7 @@ class DKExecutor:
             )
             self.db.save_position(pos)
             positions[sig.ticker] = pos
+            committed_this_scan += notional
 
             self.db.log_trade(DKTradeLog(
                 ticker=sig.ticker, action="ENTRY", reason="signal",
@@ -889,6 +900,7 @@ class DividendKingBot:
 
     def run_scan(self, force: bool = False):
         log.info("=== MORNING SCAN ===")
+        self.positions = self.db.load_positions()
         df = self.scanner.scan_watchlist()
         if df.empty:
             log.warning("Scan returned no results.")
@@ -952,6 +964,8 @@ class DividendKingBot:
         print(f"  {'Ticker':<8} {'Entry Date':<12} {'Entry $':>8} {'Yield':>7} "
               f"{'Days':>6} {'Half':>5}")
         print(f"  {'-'*60}")
+        if not self.positions:
+            print("  (no open positions)")
         for ticker, pos in self.positions.items():
             days = (datetime.now() - datetime.strptime(pos.entry_date, "%Y-%m-%d")).days
             print(f"  {ticker:<8} {pos.entry_date:<12} ${pos.entry_price:>7.2f} "
