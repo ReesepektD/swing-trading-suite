@@ -2,5 +2,8 @@ yfinance>=0.2.40
 pandas>=2.0.0
 numpy>=1.26.0
 pytz>=2024.1
+requests>=2.31.0
 hmmlearn>=0.3.0           # Markov regime detection
 alpaca-trade-api>=3.0.0   # optional — only needed for live/paper execution
+finvizfinance>=0.14.0     # analyst ratings, target price, insider data
+# fredapi is not required — FRED is accessed via direct HTTP (requests)

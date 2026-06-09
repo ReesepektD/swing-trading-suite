@@ -43,6 +43,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
+import json
+import requests
+
 import numpy as np
 import pandas as pd
 import pytz
@@ -115,11 +118,15 @@ DIVIDEND_KINGS: list[str] = [
 ]
 
 SCORE_WEIGHTS: dict[str, float] = {
-    "dividend_health": 0.30,
-    "trend_template":  0.30,
-    "momentum":        0.20,
-    "value_spread":    0.20,
+    "dividend_health":   0.25,  # yfinance fundamentals
+    "trend_template":    0.25,  # price/EMA/SMA alignment
+    "momentum":          0.15,  # RSI + volume + 20-day return
+    "value_spread":      0.20,  # yield vs. hist avg + FRED rate-adjusted ERP
+    "analyst_catalyst":  0.15,  # Finviz consensus, target upside, insider buying
 }
+# EDGAR dividend raise: flat +5 bonus added to composite outside the weighted factors
+
+FRED_SERIES_10Y = "DGS10"  # 10-year Treasury Constant Maturity Rate
 
 CONVICTION_BUY   = 70
 CONVICTION_WATCH = 50
@@ -158,6 +165,19 @@ class DKConfig:
     # Yield mean-reversion window
     yield_spread_threshold: float = 1.0  # exit if yield compresses 1% below entry
 
+    # FRED (Federal Reserve Economic Data)
+    # Get a free key at https://fred.stlouisfed.org/docs/api/api_key.html
+    fred_api_key: str = field(default_factory=lambda: os.getenv("FRED_API_KEY", ""))
+
+    # SEC EDGAR
+    # EDGAR requires a User-Agent header identifying your app and contact email
+    edgar_user_agent: str = field(
+        default_factory=lambda: os.getenv(
+            "EDGAR_USER_AGENT", "DividendKingBot/1.0 contact@example.com"
+        )
+    )
+    edgar_raise_lookback_days: int = 45  # look for dividend raises announced within N days
+
     # Schedule (Eastern Time, weekdays only)
     scan_time: str            = "09:45"
     exit_check_times: list    = field(default_factory=lambda: ["12:00", "15:30"])
@@ -194,10 +214,13 @@ class DividendKingSignal:
     trend_template_score: float
     momentum_score: float
     value_spread_score: float
+    analyst_catalyst_score: float
     composite_score: float
     signal: str                     # BUY | WATCH | PASS
     current_price: float
     current_yield_pct: float
+    edgar_raised: bool = False      # dividend raise announced within lookback window
+    fed_rate: Optional[float] = None  # 10-yr Treasury yield used in value spread
     notes: str = ""
 
 
@@ -408,8 +431,11 @@ class DKAlpacaBroker:
 # Scanner — four-factor scoring engine
 # ---------------------------------------------------------------------------
 class DividendKingScanner:
+    _cik_map: Optional[dict] = None       # class-level cache; loaded once per process
+
     def __init__(self, config: DKConfig):
         self.cfg = config
+        self._fed_rate: Optional[float] = None  # refreshed each scan call
 
     # --- Factor 1: Dividend Health (30%) ---
 
@@ -543,25 +569,55 @@ class DividendKingScanner:
 
     # --- Factor 4: Yield Value Spread (20%) ---
 
-    def _score_value_spread(self, m: DividendMetrics) -> float:
-        if m.five_yr_avg_yield_pct <= 0:
-            return 50.0
-        # Positive spread = current yield > historical avg = price is depressed = value entry
-        spread = (m.current_yield_pct - m.five_yr_avg_yield_pct) / m.five_yr_avg_yield_pct * 100
-        if spread >= 30:
-            return 95.0
-        elif spread >= 15:
-            return 80.0
-        elif spread >= 5:
-            return 65.0
-        elif spread >= -5:
-            return 50.0
-        elif spread >= -15:
-            return 35.0
-        elif spread >= -25:
-            return 20.0
+    def _score_value_spread(self, m: DividendMetrics,
+                            fed_rate: Optional[float] = None) -> float:
+        """
+        Blends two sub-signals:
+          1. Historical yield spread: current yield vs. own 5-yr average
+          2. Equity risk premium (ERP): div yield minus 10-yr Treasury yield
+             — when ERP > 1.5% the stock is attractive vs. risk-free;
+               when ERP < 0% it is below risk-free (valuation warning).
+        """
+        # Sub-signal 1: historical yield mean-reversion
+        if m.five_yr_avg_yield_pct > 0:
+            spread = (
+                (m.current_yield_pct - m.five_yr_avg_yield_pct)
+                / m.five_yr_avg_yield_pct * 100
+            )
+            if spread >= 30:
+                hist_score = 95.0
+            elif spread >= 15:
+                hist_score = 80.0
+            elif spread >= 5:
+                hist_score = 65.0
+            elif spread >= -5:
+                hist_score = 50.0
+            elif spread >= -15:
+                hist_score = 35.0
+            elif spread >= -25:
+                hist_score = 20.0
+            else:
+                hist_score = 10.0
         else:
-            return 10.0
+            hist_score = 50.0
+
+        # Sub-signal 2: equity risk premium vs. 10-yr Treasury (FRED)
+        if fed_rate is not None and fed_rate > 0:
+            erp = m.current_yield_pct - fed_rate   # e.g. 3.2% yield - 4.4% 10yr = -1.2%
+            if erp >= 2.0:
+                erp_score = 100.0
+            elif erp >= 1.0:
+                erp_score = 80.0
+            elif erp >= 0.0:
+                erp_score = 60.0
+            elif erp >= -1.0:
+                erp_score = 40.0
+            else:
+                erp_score = 20.0
+            # Blend 60% historical spread + 40% rate-adjusted ERP
+            return min(100.0, max(0.0, hist_score * 0.60 + erp_score * 0.40))
+
+        return hist_score  # no FRED data — fall back to historical spread only
 
     # --- Data fetchers ---
 
@@ -634,6 +690,222 @@ class DividendKingScanner:
             log.warning("Dividend metrics fetch failed for %s: %s", ticker, e)
             return None
 
+    # --- FRED: 10-year Treasury yield ---
+
+    def _fetch_fred_rate(self) -> Optional[float]:
+        """Fetch the latest 10-yr Treasury yield from FRED. Returns pct (e.g. 4.35)."""
+        if not self.cfg.fred_api_key:
+            log.debug("FRED_API_KEY not set — skipping rate fetch.")
+            return None
+        try:
+            url = (
+                "https://api.stlouisfed.org/fred/series/observations"
+                f"?series_id={FRED_SERIES_10Y}"
+                f"&api_key={self.cfg.fred_api_key}"
+                "&file_type=json&sort_order=desc&limit=5"
+            )
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            obs = resp.json().get("observations", [])
+            for o in obs:
+                try:
+                    rate = float(o["value"])
+                    log.debug("FRED 10yr Treasury: %.2f%%", rate)
+                    return rate
+                except (ValueError, KeyError):
+                    continue  # skip "." (missing value) entries
+        except Exception as e:
+            log.warning("FRED fetch failed: %s", e)
+        return None
+
+    # --- SEC EDGAR: recent dividend raise detection ---
+
+    def _load_edgar_cik_map(self) -> dict[str, str]:
+        """Download SEC ticker→CIK mapping (cached for the process lifetime)."""
+        if DividendKingScanner._cik_map is not None:
+            return DividendKingScanner._cik_map
+        try:
+            resp = requests.get(
+                "https://www.sec.gov/files/company_tickers.json",
+                headers={"User-Agent": self.cfg.edgar_user_agent},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            raw = resp.json()
+            # raw: {"0": {"cik_str": 78814, "ticker": "PG", "title": "..."}, ...}
+            cik_map = {
+                v["ticker"].upper(): str(v["cik_str"]).zfill(10)
+                for v in raw.values()
+            }
+            DividendKingScanner._cik_map = cik_map
+            log.info("EDGAR CIK map loaded (%d tickers).", len(cik_map))
+        except Exception as e:
+            log.warning("EDGAR CIK map load failed: %s", e)
+            DividendKingScanner._cik_map = {}
+        return DividendKingScanner._cik_map
+
+    def _fetch_edgar_announcement(self, ticker: str) -> bool:
+        """
+        Return True if EDGAR shows a dividend-per-share increase within the
+        lookback window, using the XBRL company facts API.
+        """
+        try:
+            from datetime import timedelta
+            cik_map = self._load_edgar_cik_map()
+            cik = cik_map.get(ticker.upper())
+            if not cik:
+                return False
+
+            url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+            resp = requests.get(
+                url,
+                headers={"User-Agent": self.cfg.edgar_user_agent},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            facts = resp.json()
+
+            # Try both common XBRL concepts for per-share dividends declared
+            concepts = [
+                ("us-gaap", "CommonStockDividendsPerShareDeclared"),
+                ("us-gaap", "CommonStockDividendsPerShareCashPaid"),
+            ]
+            for ns, concept in concepts:
+                data = facts.get(ns, {}).get(concept, {})
+                units = data.get("units", {})
+                entries = units.get("USD/shares", []) or units.get("shares", [])
+
+                # Keep only quarterly (10-Q / 10-K) filed entries
+                quarterly = [
+                    e for e in entries
+                    if e.get("form") in ("10-Q", "10-K") and e.get("val") is not None
+                ]
+                if len(quarterly) < 6:
+                    continue
+
+                quarterly.sort(key=lambda e: e["end"])
+                cutoff = (
+                    datetime.now() - timedelta(days=self.cfg.edgar_raise_lookback_days)
+                ).strftime("%Y-%m-%d")
+
+                recent = quarterly[-1]
+                if recent["end"] < cutoff:
+                    continue  # most recent filing is older than our lookback
+
+                # Compare most recent declared amount to same quarter last year
+                year_ago_candidates = [
+                    e for e in quarterly
+                    if e["end"] < recent["end"]
+                    and abs(
+                        (datetime.strptime(recent["end"], "%Y-%m-%d") -
+                         datetime.strptime(e["end"], "%Y-%m-%d")).days - 365
+                    ) <= 45
+                ]
+                if year_ago_candidates:
+                    year_ago = year_ago_candidates[-1]
+                    if float(recent["val"]) > float(year_ago["val"]):
+                        log.info(
+                            "EDGAR raise detected: %s  $%.4f → $%.4f",
+                            ticker, float(year_ago["val"]), float(recent["val"]),
+                        )
+                        return True
+        except Exception as e:
+            log.debug("EDGAR announcement check failed for %s: %s", ticker, e)
+        return False
+
+    # --- Finviz: analyst consensus, target price, insider buying ---
+
+    def _fetch_finviz_data(self, ticker: str) -> Optional[dict]:
+        """
+        Fetch analyst recommendation, target price, and insider transaction data
+        from Finviz. Returns the raw fundament dict or None on failure.
+        """
+        try:
+            from finvizfinance.quote import finvizfinance
+            stock = finvizfinance(ticker)
+            data  = stock.ticker_fundament()
+            return data if isinstance(data, dict) else None
+        except ImportError:
+            log.debug("finvizfinance not installed — pip install finvizfinance")
+            return None
+        except Exception as e:
+            log.debug("Finviz fetch failed for %s: %s", ticker, e)
+            return None
+
+    # --- Factor 5: Analyst Catalyst (15%) ---
+
+    def _score_analyst_catalyst(self, finviz: dict, current_price: float) -> float:
+        """
+        Score = blend of:
+          - Analyst consensus recommendation (1=Strong Buy … 5=Strong Sell)
+          - Target price upside vs. current price
+          - Insider buying direction (positive % = net buying)
+        Falls back to neutral 50 for any field that can't be parsed.
+        """
+        def _parse_float(s: str) -> Optional[float]:
+            if not s:
+                return None
+            try:
+                return float(str(s).replace("$", "").replace("%", "")
+                             .replace("+", "").replace(",", "").strip())
+            except (ValueError, AttributeError):
+                return None
+
+        # Analyst recommendation
+        recom = _parse_float(finviz.get("Recom") or finviz.get("Analyst Recom"))
+        if recom is not None:
+            if recom <= 1.5:
+                recom_score = 100.0
+            elif recom <= 2.0:
+                recom_score = 85.0
+            elif recom <= 2.5:
+                recom_score = 65.0
+            elif recom <= 3.0:
+                recom_score = 45.0
+            else:
+                recom_score = 15.0
+        else:
+            recom_score = 50.0
+
+        # Target price upside
+        target = _parse_float(finviz.get("Target Price"))
+        if target and current_price > 0:
+            upside = (target - current_price) / current_price * 100
+            if upside >= 20:
+                target_score = 100.0
+            elif upside >= 10:
+                target_score = 80.0
+            elif upside >= 5:
+                target_score = 60.0
+            elif upside >= 0:
+                target_score = 45.0
+            else:
+                target_score = 15.0
+        else:
+            target_score = 50.0
+
+        # Insider transaction % (positive = net buying)
+        insider = _parse_float(finviz.get("Insider Trans"))
+        if insider is not None:
+            if insider >= 5:
+                insider_score = 95.0
+            elif insider > 0:
+                insider_score = 70.0
+            elif insider == 0:
+                insider_score = 50.0
+            elif insider >= -5:
+                insider_score = 35.0
+            else:
+                insider_score = 15.0
+        else:
+            insider_score = 50.0
+
+        return min(100.0, max(0.0,
+            recom_score  * 0.50 +
+            target_score * 0.35 +
+            insider_score * 0.15
+        ))
+
     # --- Score a single ticker ---
 
     def score_ticker(self, ticker: str) -> Optional[DividendKingSignal]:
@@ -652,8 +924,8 @@ class DividendKingScanner:
         if metrics.current_yield_pct < self.cfg.min_yield_pct:
             return DividendKingSignal(
                 ticker=ticker, dividend_health_score=0, trend_template_score=0,
-                momentum_score=0, value_spread_score=0, composite_score=0,
-                signal="PASS", current_price=price,
+                momentum_score=0, value_spread_score=0, analyst_catalyst_score=0,
+                composite_score=0, signal="PASS", current_price=price,
                 current_yield_pct=metrics.current_yield_pct,
                 notes=f"yield {metrics.current_yield_pct:.1f}% < min {self.cfg.min_yield_pct}%",
             )
@@ -661,23 +933,33 @@ class DividendKingScanner:
         if metrics.payout_ratio > self.cfg.max_payout_ratio:
             return DividendKingSignal(
                 ticker=ticker, dividend_health_score=0, trend_template_score=0,
-                momentum_score=0, value_spread_score=0, composite_score=0,
-                signal="PASS", current_price=price,
+                momentum_score=0, value_spread_score=0, analyst_catalyst_score=0,
+                composite_score=0, signal="PASS", current_price=price,
                 current_yield_pct=metrics.current_yield_pct,
                 notes=f"payout {metrics.payout_ratio:.0%} > max {self.cfg.max_payout_ratio:.0%}",
             )
 
+        # --- Score all five factors ---
         dh  = self._score_dividend_health(metrics)
         tt  = self._score_trend_template(hist)
         mom = self._score_momentum(hist)
-        vs  = self._score_value_spread(metrics)
+        vs  = self._score_value_spread(metrics, self._fed_rate)
+
+        finviz_data   = self._fetch_finviz_data(ticker)
+        ac            = self._score_analyst_catalyst(finviz_data or {}, price)
+        edgar_raised  = self._fetch_edgar_announcement(ticker)
 
         composite = (
-            dh  * SCORE_WEIGHTS["dividend_health"] +
-            tt  * SCORE_WEIGHTS["trend_template"]  +
-            mom * SCORE_WEIGHTS["momentum"]        +
-            vs  * SCORE_WEIGHTS["value_spread"]
+            dh  * SCORE_WEIGHTS["dividend_health"]   +
+            tt  * SCORE_WEIGHTS["trend_template"]    +
+            mom * SCORE_WEIGHTS["momentum"]          +
+            vs  * SCORE_WEIGHTS["value_spread"]      +
+            ac  * SCORE_WEIGHTS["analyst_catalyst"]
         )
+
+        # EDGAR bonus: flat +5 for a confirmed recent dividend raise
+        if edgar_raised:
+            composite = min(100.0, composite + 5.0)
 
         if composite >= CONVICTION_BUY:
             signal = "BUY"
@@ -686,11 +968,15 @@ class DividendKingScanner:
         else:
             signal = "PASS"
 
+        fed_str    = f"{self._fed_rate:.2f}%" if self._fed_rate else "n/a"
+        edgar_str  = "RAISE!" if edgar_raised else ""
         notes = (
-            f"DH={dh:.0f} TT={tt:.0f} MOM={mom:.0f} VS={vs:.0f} | "
+            f"DH={dh:.0f} TT={tt:.0f} MOM={mom:.0f} VS={vs:.0f} AC={ac:.0f} "
+            f"{edgar_str} | "
             f"yield={metrics.current_yield_pct:.2f}% "
             f"payout={metrics.payout_ratio:.0%} "
-            f"div5yr={metrics.div_growth_5yr_pct:.1f}%"
+            f"div5yr={metrics.div_growth_5yr_pct:.1f}% "
+            f"10yr={fed_str}"
         )
         log.info("  %-6s %s  %.1f  [%s]", ticker, signal, composite, notes)
 
@@ -700,15 +986,26 @@ class DividendKingScanner:
             trend_template_score=tt,
             momentum_score=mom,
             value_spread_score=vs,
+            analyst_catalyst_score=ac,
             composite_score=composite,
             signal=signal,
             current_price=price,
             current_yield_pct=metrics.current_yield_pct,
+            edgar_raised=edgar_raised,
+            fed_rate=self._fed_rate,
             notes=notes,
         )
 
     def scan_watchlist(self, tickers: Optional[list] = None) -> pd.DataFrame:
         tickers = tickers or self.cfg.watchlist
+
+        # Fetch FRED rate once for the whole scan (shared across all tickers)
+        self._fed_rate = self._fetch_fred_rate()
+        if self._fed_rate:
+            log.info("FRED 10-yr Treasury: %.2f%%", self._fed_rate)
+        else:
+            log.info("FRED rate unavailable — value spread uses historical yield only.")
+
         rows = []
         for ticker in tickers:
             try:
@@ -722,8 +1019,11 @@ class DividendKingScanner:
                         "trend":           round(sig.trend_template_score, 1),
                         "momentum":        round(sig.momentum_score, 1),
                         "value_spread":    round(sig.value_spread_score, 1),
+                        "analyst":         round(sig.analyst_catalyst_score, 1),
+                        "edgar_raised":    sig.edgar_raised,
                         "price":           round(sig.current_price, 2),
                         "yield_pct":       round(sig.current_yield_pct, 2),
+                        "10yr_treasury":   round(sig.fed_rate, 2) if sig.fed_rate else None,
                         "notes":           sig.notes,
                     })
             except Exception as e:
@@ -917,10 +1217,12 @@ class DividendKingBot:
                 trend_template_score=row["trend"],
                 momentum_score=row["momentum"],
                 value_spread_score=row["value_spread"],
+                analyst_catalyst_score=row["analyst"],
                 composite_score=row["composite_score"],
                 signal=row["signal"],
                 current_price=row["price"],
                 current_yield_pct=row["yield_pct"],
+                edgar_raised=bool(row.get("edgar_raised", False)),
                 notes=row["notes"],
             )
             for _, row in buy_watch.iterrows()
