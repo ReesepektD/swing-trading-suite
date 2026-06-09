@@ -1,7 +1,9 @@
 # Bot runtime artifacts
 camillo_bot.db
 camillo_bot.log
+dividend_king_bot.db
 social_arb_*.csv
+dk_scan_*.csv
 
 # Python
 __pycache__/
