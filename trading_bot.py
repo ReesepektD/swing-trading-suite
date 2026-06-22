@@ -1834,9 +1834,6 @@ class ReportBuilder:
                 delta = close.diff()
                 gain  = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
                 loss  = (-delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
-                rsi   = float(100 - (100 / (1 + gain / loss.replace(0, np.nan)))).iloc[-1] if hasattr((100 - (100 / (1 + gain / loss.replace(0, np.nan)))), 'iloc') else float((100 - (100 / (1 + gain / loss.replace(0, np.nan)))).iloc[-1])
-
-                # Quick RSI calc
                 rs_series = gain / loss.replace(0, np.nan)
                 rsi_val   = float((100 - 100 / (1 + rs_series)).iloc[-1])
                 rsi_cls   = "ok" if 50 < rsi_val < 70 else "warn" if 40 <= rsi_val <= 50 else "no"
