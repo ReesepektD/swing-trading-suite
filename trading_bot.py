@@ -149,6 +149,8 @@ def _add_no_reentry(ticker: str) -> None:
     try:
         today  = datetime.now(pytz.timezone("America/New_York")).date().isoformat()
         data   = _load_no_reentry_raw()
+        if data.get("date") != today:
+            data = {}   # stale — different trading day, start fresh
         if ticker not in data.get("tickers", []):
             data.setdefault("tickers", []).append(ticker)
         data["date"] = today
