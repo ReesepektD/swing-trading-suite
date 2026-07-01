@@ -11,6 +11,7 @@ ENTRY: Trend accelerating + analyst coverage thin + price hasn't moved yet
 EXIT:  Trend peaks (mainstream) OR analyst coverage rapidly expands
 """
 
+import logging
 import os
 import random
 import time
@@ -25,6 +26,8 @@ import yfinance as yf
 from pytrends.request import TrendReq
 
 warnings.filterwarnings("ignore")
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # CONFIG
