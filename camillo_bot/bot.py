@@ -25,6 +25,7 @@ from .broker import AlpacaBroker, DryRunBroker, BaseBroker
 from .config import Config
 from .database import Database
 from .executor import Executor
+from .market_scanner import MarketScanner
 from .notifier import EmailNotifier
 
 # Import scanners from parent directory
@@ -44,13 +45,14 @@ class CamilloBot:
         self.db       = db
         self.executor = Executor(broker, db, config)
         self.notifier = notifier or EmailNotifier.from_env()
-        self._scanner = SocialArbitrageScanner(
+        self._scanner        = SocialArbitrageScanner(
             reddit_creds={
                 "client_id":     config.reddit_client_id,
                 "client_secret": config.reddit_client_secret,
             } if config.reddit_client_id else None
         )
-        self._markov = MarkovHedgeScanner()
+        self._markov         = MarkovHedgeScanner()
+        self._market_scanner = MarketScanner()
 
     # ------------------------------------------------------------------
     # Core jobs
@@ -66,9 +68,20 @@ class CamilloBot:
             return
 
         log.info("━━━ MORNING SCAN ━━━  %s", datetime.now(ET).strftime("%Y-%m-%d %H:%M ET"))
-        print(f"\n[{datetime.now(ET).strftime('%H:%M')}] Running morning scan on {len(self.config.watchlist)} tickers...")
 
-        results = self._scanner.scan_watchlist(self.config.watchlist)
+        # Dynamic daily discovery — find today's candidates from the market
+        watchlist = self.config.watchlist  # non-empty only if manually overridden
+        if not watchlist:
+            print(f"\n[{datetime.now(ET).strftime('%H:%M')}] Scanning market for candidates…")
+            watchlist = self._market_scanner.get_candidates()
+            if not watchlist:
+                log.warning("Market scanner returned no candidates — skipping scan")
+                return
+            log.info("Market scanner found %d candidates: %s",
+                     len(watchlist), [w["ticker"] for w in watchlist])
+
+        print(f"\n[{datetime.now(ET).strftime('%H:%M')}] Scoring {len(watchlist)} candidates…")
+        results = self._scanner.scan_watchlist(watchlist)
         if results.empty:
             log.warning("Scan returned no results")
             return
@@ -85,7 +98,7 @@ class CamilloBot:
 
         # Markov regime filter: build a set of tickers currently in Bull regime
         try:
-            markov_results = self._markov.scan_watchlist(self.config.watchlist)
+            markov_results = self._markov.scan_watchlist(watchlist)
             bull_tickers = set(
                 markov_results.loc[markov_results["Regime"] == "Bull", "Ticker"].tolist()
             )
@@ -115,7 +128,7 @@ class CamilloBot:
                     log.info("Skipping %s — Markov regime is not Bull", ticker)
                     continue
                 item = next(
-                    (w for w in self.config.watchlist if w["ticker"] == ticker), None
+                    (w for w in watchlist if w["ticker"] == ticker), None
                 )
                 if item:
                     sig = self._scanner.score_ticker(ticker, item["keywords"])

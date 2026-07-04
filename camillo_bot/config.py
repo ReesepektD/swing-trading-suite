@@ -44,16 +44,9 @@ class Config:
     reddit_client_secret: str = ""
 
     # ── Watchlist ─────────────────────────────────────────────────────
-    # Each entry: {"ticker": "XYZ", "keywords": ["plain english search terms"]}
-    # Keywords should be what a non-investor would type — not the company name.
-    watchlist: list = field(default_factory=lambda: [
-        {"ticker": "CELH",  "keywords": ["celsius drink", "celsius energy drink"]},
-        {"ticker": "ONON",  "keywords": ["on running shoes", "on cloud shoes"]},
-        {"ticker": "BIRK",  "keywords": ["birkenstock", "birkenstock sandals"]},
-        {"ticker": "DUOL",  "keywords": ["duolingo", "duolingo streak"]},
-        {"ticker": "CAVA",  "keywords": ["cava restaurant", "cava bowl", "cava mediterranean"]},
-        {"ticker": "BROS",  "keywords": ["dutch bros coffee", "dutch brothers coffee"]},
-    ])
+    # Left empty — populated dynamically each morning by MarketScanner.
+    # Override with a static list for backtesting or targeted manual scans.
+    watchlist: list = field(default_factory=list)
 
     @classmethod
     def from_env(cls) -> "Config":
