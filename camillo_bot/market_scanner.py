@@ -179,6 +179,20 @@ class MarketScanner:
             log.warning("No candidates passed volume-spike filter (spike≥%.2f)", MIN_SPIKE)
             return []
 
+        # Market cap filter (avoid micro-caps and mega-caps) — fetched only for
+        # tickers that already cleared price/volume/spike, to keep calls cheap
+        market_caps = self._fetch_market_caps(screen.index.tolist())
+        screen["market_cap"] = pd.Series(market_caps)
+        screen = screen.dropna(subset=["market_cap"])
+        screen = screen[
+            (screen["market_cap"] >= MIN_MARKET_CAP) &
+            (screen["market_cap"] <= MAX_MARKET_CAP)
+        ]
+
+        if screen.empty:
+            log.warning("No candidates passed market-cap filter (%.0f-%.0f)", MIN_MARKET_CAP, MAX_MARKET_CAP)
+            return []
+
         # Sort by volume spike descending, take top N
         candidates_df = screen.sort_values("spike", ascending=False).head(self.candidate_limit)
 
@@ -214,3 +228,16 @@ class MarketScanner:
                 names[ticker] = ticker
             time.sleep(0.2)   # gentle pacing — avoid Yahoo rate-limit
         return names
+
+    def _fetch_market_caps(self, tickers: list[str]) -> dict[str, float]:
+        """Return {ticker: market_cap} for each ticker, best-effort."""
+        caps: dict[str, float] = {}
+        for ticker in tickers:
+            try:
+                cap = yf.Ticker(ticker).fast_info.market_cap
+                if cap:
+                    caps[ticker] = float(cap)
+            except Exception:
+                pass
+            time.sleep(0.2)   # gentle pacing — avoid Yahoo rate-limit
+        return caps
