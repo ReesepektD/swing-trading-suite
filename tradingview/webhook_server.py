@@ -108,7 +108,7 @@ def _handle_signal(payload: dict[str, Any]) -> tuple[int, str]:
         try:
             account  = _bot.broker.get_account()
             from camillo_bot.risk import size_order
-            from camillo_bot.database import DBPosition, TradeLog
+            from camillo_bot.database import DBPosition
             n_pos = len(_bot.db.get_all_positions())
             sizing = size_order(
                 ticker         = ticker,

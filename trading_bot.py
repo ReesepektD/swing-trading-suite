@@ -2018,7 +2018,6 @@ class ReportBuilder:
     # ── mid-day report ────────────────────────────────────────────────────────
     def mid_day(self) -> tuple[str, str]:
         r     = self.r
-        score = int(r["tt_score"])
 
         # Intraday price (best effort via yfinance 1m)
         try:
