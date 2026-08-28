@@ -1217,7 +1217,7 @@ class MarketScanner:
         return list(dict.fromkeys(combined))
 
     # ── scan ──────────────────────────────────────────────────────────────────
-    def scan(self, top_n: int = 5) -> list[ScanResult]:
+    def scan(self, top_n: int = 15) -> list[ScanResult]:
         universe = self._get_universe()
         log.info(f"Market scan: downloading {len(universe)} tickers (1y daily)…")
 
@@ -1325,7 +1325,7 @@ class TradeExecutor:
       • Minimum qty = 1; skip if risk_per_share ≤ 0
     """
 
-    MAX_POSITIONS = 3
+    MAX_POSITIONS = 10       # raised from 3 — was blocking all new entries
     RISK_PCT      = 0.015    # 1.5% of portfolio per trade
     MAX_SIZE_PCT  = 0.15     # 15% of portfolio per position
 
@@ -1383,6 +1383,20 @@ class TradeExecutor:
         open_count = self._open_position_count()
         log.info(f"TradeExecutor: {open_count} positions open, max={self.MAX_POSITIONS}")
 
+        # ── VIX gate ──────────────────────────────────────────────────────────
+        vix_val = 16.0
+        try:
+            vix_val = float(yf.Ticker("^VIX").fast_info.last_price)
+            log.info(f"VIX={vix_val:.1f}")
+        except Exception:
+            log.warning("Could not fetch VIX — defaulting to 16.0")
+        if vix_val > 40:
+            log.warning(f"VIX={vix_val:.1f} > 40 — CASH ONLY. No new entries.")
+            return []
+        vix_size_half = vix_val > 20   # VIX 20-40: halve all position sizes
+        if vix_size_half:
+            log.info(f"VIX={vix_val:.1f} > 20 — position sizes halved.")
+
         no_reentry = _load_no_reentry()
 
         portfolio = 100_000.0   # fallback for dry-run
@@ -1424,8 +1438,10 @@ class TradeExecutor:
                 log.info(f"  {ticker}: on no-reentry list (stopped out today) — skip.")
                 continue
 
-            # Size order
+            # Size order (halved when VIX 20-40)
             qty = self._size_order(result.price, result.stop, portfolio)
+            if vix_size_half:
+                qty = max(1, qty // 2)
             if qty < 1:
                 log.info(f"  {ticker}: qty=0 after sizing (price=${result.price:.2f} stop=${result.stop:.2f}) — skip.")
                 continue
@@ -1447,11 +1463,25 @@ class TradeExecutor:
                         side          = "buy",
                         type          = "market",
                         time_in_force = "day",
+                        order_class   = "bracket",
+                        stop_loss     = {"stop_price": str(round(result.stop, 2))},
+                        take_profit   = {"limit_price": str(round(result.target, 2))},
                     )
                     open_count += 1
                 except Exception as e:
-                    log.error(f"  {ticker}: order failed — {e}")
-                    continue
+                    log.warning(f"  {ticker}: bracket order failed ({e}) — retrying as simple market order")
+                    try:
+                        self.broker.api.submit_order(
+                            symbol        = ticker,
+                            qty           = qty,
+                            side          = "buy",
+                            type          = "market",
+                            time_in_force = "day",
+                        )
+                        open_count += 1
+                    except Exception as e2:
+                        log.error(f"  {ticker}: simple order also failed — {e2}")
+                        continue
             else:
                 # Dry-run: count it anyway so we respect max-positions in log
                 open_count += 1
@@ -1538,11 +1568,13 @@ class TradeExecutor:
 # ─────────────────────────────────────────────────────────────────────────────
 @dataclass
 class MonitorAction:
-    ticker:  str
-    action:  str   # "exit" | "trim" | "trail_stop" | "hold"
-    reason:  str
-    price:   float
-    qty:     int
+    ticker:      str
+    action:      str   # "exit" | "trim" | "trail_stop" | "hold"
+    reason:      str
+    price:       float
+    qty:         int
+    entry_price: float = 0.0   # Alpaca avg_entry_price
+    pl_pct:      float = 0.0   # unrealised P&L % vs entry
 
 
 class PositionMonitor:
@@ -1634,7 +1666,7 @@ class PositionMonitor:
 
             try:
                 # Daily data for indicators
-                df = fetch_data(symbol, days=self.cfg.lookback_days)
+                df    = fetch_data(symbol, days=self.cfg.lookback_days)
                 ind   = Indicators(df, self.cfg)
                 strat = Strategies(ind)
                 r     = ind.df.iloc[-1]
@@ -1646,39 +1678,69 @@ class PositionMonitor:
 
                 stop   = float(r["sl"])
                 target = float(r["tp"])
+                atr    = float(r["atr"]) if not pd.isna(r["atr"]) else 0.0
+
+                # Entry price + unrealised P&L from Alpaca position
+                entry_price = 0.0
+                pl_pct      = 0.0
+                try:
+                    entry_price = float(pos.avg_entry_price)
+                    if entry_price > 0:
+                        pl_pct = (cur_price - entry_price) / entry_price * 100
+                except Exception:
+                    pass
 
                 log.info(
-                    f"  {symbol}: cur=${cur_price:.2f}  "
-                    f"stop=${stop:.2f}  target=${target:.2f}  "
+                    f"  {symbol}: cur=${cur_price:.2f}  entry=${entry_price:.2f}  "
+                    f"pl={pl_pct:+.1f}%  stop=${stop:.2f}  target=${target:.2f}  "
                     f"TT={int(r['tt_score'])}/7  stage2={bool(r['stage2'])}"
                 )
 
-                # Priority 1: Exit — stop hit
+                # Priority 1: Exit — stop hit (belt-and-suspenders; bracket order also covers this)
                 if cur_price <= stop:
-                    reason = f"Stop hit: ${cur_price:.2f} ≤ ${stop:.2f}"
+                    reason = f"Stop hit: ${cur_price:.2f} ≤ ${stop:.2f} ({pl_pct:+.1f}%)"
                     log.info(f"  → EXIT ({reason})")
                     self._exit(symbol, qty)
                     _add_no_reentry(symbol)
-                    actions.append(MonitorAction(symbol, "exit", reason, cur_price, qty))
+                    actions.append(MonitorAction(symbol, "exit", reason, cur_price, qty, entry_price, pl_pct))
                     continue
 
                 # Priority 2: Exit — signal (EMA50 break or Stage 4)
                 exit_s = strat.exit_signal()
                 if exit_s:
-                    reason = f"Exit signal: {exit_s.reason}"
+                    reason = f"Exit signal: {exit_s.reason} ({pl_pct:+.1f}%)"
                     log.info(f"  → EXIT ({reason})")
                     self._exit(symbol, qty)
                     _add_no_reentry(symbol)
-                    actions.append(MonitorAction(symbol, "exit", reason, cur_price, qty))
+                    actions.append(MonitorAction(symbol, "exit", reason, cur_price, qty, entry_price, pl_pct))
                     continue
 
                 # Priority 3: Trim at target
                 if cur_price >= target and qty >= 2:
                     trimmed = self._trim(symbol, qty)
-                    reason  = f"Target reached: ${cur_price:.2f} ≥ ${target:.2f} → sold {trimmed} shares"
+                    reason  = f"Target reached: ${cur_price:.2f} ≥ ${target:.2f} → sold {trimmed} shares ({pl_pct:+.1f}%)"
                     log.info(f"  → TRIM ({reason})")
-                    actions.append(MonitorAction(symbol, "trim", reason, cur_price, trimmed))
+                    actions.append(MonitorAction(symbol, "trim", reason, cur_price, trimmed, entry_price, pl_pct))
                     continue
+
+                # Priority 4: Trailing stop alert — notify when stop should be raised
+                if atr > 0 and entry_price > 0 and cur_price > entry_price:
+                    gain = cur_price - entry_price
+                    if gain >= 2.5 * atr and stop < entry_price + atr:
+                        # Price > entry + 2.5×ATR: trail to entry + 1×ATR
+                        new_stop = round(entry_price + atr, 2)
+                        reason = (f"⬆️ Trail stop to ${new_stop:.2f} "
+                                  f"(entry+1×ATR — locked in gain) — up {pl_pct:.1f}%")
+                        log.info(f"  → TRAIL ALERT: {reason}")
+                        actions.append(MonitorAction(symbol, "trail_stop", reason, cur_price, qty, entry_price, pl_pct))
+                        continue
+                    elif gain >= 1.5 * atr and stop < entry_price:
+                        # Price > entry + 1.5×ATR: raise stop to breakeven
+                        reason = (f"⬆️ Trail stop to breakeven ${entry_price:.2f} "
+                                  f"— up {pl_pct:.1f}%")
+                        log.info(f"  → TRAIL ALERT: {reason}")
+                        actions.append(MonitorAction(symbol, "trail_stop", reason, cur_price, qty, entry_price, pl_pct))
+                        continue
 
                 # Hold — check if any new entry signals worth noting
                 new_sigs = strat.all_signals()
@@ -1686,7 +1748,7 @@ class PositionMonitor:
                     sig_names = ", ".join(s.strategy for s in new_sigs)
                     reason = f"New signals: {sig_names}"
                     log.info(f"  → HOLD with new signal(s): {reason}")
-                    actions.append(MonitorAction(symbol, "hold", reason, cur_price, qty))
+                    actions.append(MonitorAction(symbol, "hold", reason, cur_price, qty, entry_price, pl_pct))
                 else:
                     log.info(f"  → HOLD — no action needed")
 
@@ -1701,7 +1763,7 @@ class PositionMonitor:
     @staticmethod
     def _monitor_html(actions: list[MonitorAction], date_str: str) -> tuple[str, str]:
         if not actions:
-            rows = '<tr><td colspan="4" class="neu" style="text-align:center">All positions holding — no action taken.</td></tr>'
+            rows = '<tr><td colspan="6" class="neu" style="text-align:center">All positions holding — no action taken.</td></tr>'
         else:
             rows = ""
             for a in actions:
@@ -1709,15 +1771,22 @@ class PositionMonitor:
                     cls, icon = "no",   "🚨 EXIT"
                 elif a.action == "trim":
                     cls, icon = "warn", "✂️  TRIM"
+                elif a.action == "trail_stop":
+                    cls, icon = "warn", "⬆️  TRAIL"
                 elif a.action == "hold":
                     cls, icon = "ok",   "⚡ SIGNAL"
                 else:
                     cls, icon = "neu",  "HOLD"
+                entry_str = f"${a.entry_price:.2f}" if a.entry_price else "—"
+                pl_cls    = "ok" if a.pl_pct >= 0 else "no"
+                pl_str    = f"{a.pl_pct:+.1f}%" if a.entry_price else "—"
                 rows += f"""
                 <tr>
                   <td><b>{a.ticker}</b></td>
                   <td class="{cls}">{icon}</td>
                   <td>${a.price:.2f}</td>
+                  <td style="color:#9e9e9e;font-size:12px">{entry_str}</td>
+                  <td class="{pl_cls}" style="font-size:12px">{pl_str}</td>
                   <td style="color:#b0bec5;font-size:12px">{a.reason}</td>
                 </tr>"""
 
@@ -1730,6 +1799,8 @@ class PositionMonitor:
             <td style="color:#9e9e9e">Ticker</td>
             <td style="color:#9e9e9e">Action</td>
             <td style="color:#9e9e9e">Price</td>
+            <td style="color:#9e9e9e">Entry</td>
+            <td style="color:#9e9e9e">P&amp;L</td>
             <td style="color:#9e9e9e">Reason</td>
           </tr>
           {rows}
@@ -1739,11 +1810,13 @@ class PositionMonitor:
 
         exits  = sum(1 for a in actions if a.action == "exit")
         trims  = sum(1 for a in actions if a.action == "trim")
+        trails = sum(1 for a in actions if a.action == "trail_stop")
         sigs   = sum(1 for a in actions if a.action == "hold")
         parts  = []
-        if exits: parts.append(f"{exits} exit{'s' if exits > 1 else ''}")
-        if trims: parts.append(f"{trims} trim{'s' if trims > 1 else ''}")
-        if sigs:  parts.append(f"{sigs} new signal{'s' if sigs > 1 else ''}")
+        if exits:  parts.append(f"{exits} exit{'s' if exits > 1 else ''}")
+        if trims:  parts.append(f"{trims} trim{'s' if trims > 1 else ''}")
+        if trails: parts.append(f"{trails} trail{'s' if trails > 1 else ''}")
+        if sigs:   parts.append(f"{sigs} new signal{'s' if sigs > 1 else ''}")
         summary = ", ".join(parts) if parts else "all holding"
         subj    = f"📡 Monitor Alert ({summary}) — {date_str}"
         return subj, html
@@ -1968,7 +2041,7 @@ class ReportBuilder:
             sig_html = '<div class="rule">No active entry signals. Stay patient.</div>'
 
         # Full market scan — top 5 setups
-        top5        = self.mkt_scanner.scan(top_n=5)
+        top5        = self.mkt_scanner.scan(top_n=15)
         top5_html   = self._top5_html(top5)
 
         # Pre-market heat map — top 3 bullish movers
@@ -2134,8 +2207,14 @@ if __name__ == "__main__":
         log.info("=== TRADE EXECUTION MODE ===")
         date_str = datetime.now(pytz.timezone("America/New_York")).strftime("%A, %B %d %Y")
 
-        scanner  = MarketScanner(cfg)
-        top5     = scanner.scan(top_n=5)
+        # Use pre-market scan cache if available — avoids re-downloading 566 tickers
+        top5 = _load_scan_cache()
+        if not top5:
+            log.info("No premarket cache found — running fresh scan…")
+            scanner = MarketScanner(cfg)
+            top5 = scanner.scan(top_n=15)
+        else:
+            log.info(f"Using premarket cache: {len(top5)} setups.")
 
         executor = TradeExecutor(cfg)
         trades   = executor.execute(top5)
@@ -2211,15 +2290,22 @@ if __name__ == "__main__":
                     cls, icon = "no",   "🚨 EXIT"
                 elif a.action == "trim":
                     cls, icon = "warn", "✂️  TRIM"
+                elif a.action == "trail_stop":
+                    cls, icon = "warn", "⬆️  TRAIL"
                 elif a.action == "hold":
                     cls, icon = "ok",   "⚡ SIGNAL"
                 else:
                     continue
+                entry_str = f"${a.entry_price:.2f}" if a.entry_price else "—"
+                pl_cls    = "ok" if a.pl_pct >= 0 else "no"
+                pl_str    = f"{a.pl_pct:+.1f}%" if a.entry_price else "—"
                 mon_rows += f"""
                 <tr>
                   <td><b>{a.ticker}</b></td>
                   <td class="{cls}">{icon}</td>
                   <td>${a.price:.2f}</td>
+                  <td style="color:#9e9e9e;font-size:12px">{entry_str}</td>
+                  <td class="{pl_cls}" style="font-size:12px">{pl_str}</td>
                   <td style="color:#b0bec5;font-size:12px">{a.reason}</td>
                 </tr>"""
 
@@ -2232,6 +2318,8 @@ if __name__ == "__main__":
                     <td style="color:#9e9e9e">Ticker</td>
                     <td style="color:#9e9e9e">Action</td>
                     <td style="color:#9e9e9e">Price</td>
+                    <td style="color:#9e9e9e">Entry</td>
+                    <td style="color:#9e9e9e">P&amp;L</td>
                     <td style="color:#9e9e9e">Reason</td>
                   </tr>{mon_rows}
                 </table>"""
