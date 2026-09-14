@@ -171,6 +171,48 @@ def _load_no_reentry_raw() -> dict:
         return {}
 
 
+TRIM_LOG_PATH = "/tmp/qqq_trim_log.json"
+MAX_TRIMS_PER_POSITION = 2   # scale out at most twice; the rest is a runner
+
+
+def _trim_count(ticker: str) -> int:
+    """How many times this position has already been trimmed."""
+    try:
+        with open(TRIM_LOG_PATH) as fh:
+            return int(json.load(fh).get(ticker, 0))
+    except Exception:
+        return 0
+
+
+def _record_trim(ticker: str) -> None:
+    """Increment the trim counter for a ticker."""
+    try:
+        try:
+            with open(TRIM_LOG_PATH) as fh:
+                data = json.load(fh)
+        except Exception:
+            data = {}
+        data[ticker] = int(data.get(ticker, 0)) + 1
+        with open(TRIM_LOG_PATH, "w") as fh:
+            json.dump(data, fh)
+        log.info(f"Trim log: {ticker} now trimmed {data[ticker]}x")
+    except Exception as e:
+        log.warning(f"Could not record trim for {ticker}: {e}")
+
+
+def _clear_trim(ticker: str) -> None:
+    """Reset trim counter once a position is fully closed."""
+    try:
+        with open(TRIM_LOG_PATH) as fh:
+            data = json.load(fh)
+        if ticker in data:
+            del data[ticker]
+            with open(TRIM_LOG_PATH, "w") as fh:
+                json.dump(data, fh)
+    except Exception:
+        pass
+
+
 def _load_no_reentry() -> set:
     """Return set of tickers blocked from new entries today."""
     try:
@@ -229,7 +271,7 @@ class Config:
     # ATR / Risk
     atr_len:          int   = 14
     atr_sl_mult:      float = 2.0
-    atr_tp_mult:      float = 3.0
+    atr_tp_mult:      float = 4.0   # 2:1 R:R (was 3.0 = 1.5:1 — too thin an edge)
 
     # Break & Bounce
     bb_require_vol:   bool  = True
@@ -252,6 +294,9 @@ class Config:
     en_pullback:      bool  = True
     en_break_bounce:  bool  = True
     en_touch_turn:    bool  = True
+
+    # Profit target
+    daily_goal:       float = 100.0    # target net P&L per trading day ($)
 
     # Execution
     paper_trading:    bool  = True
@@ -365,6 +410,54 @@ class Indicators:
         df["tp"] = c + df["atr"] * cfg.atr_tp_mult
 
         self.df = df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DAILY GOAL TRACKER  — progress toward the per-day profit target
+# ─────────────────────────────────────────────────────────────────────────────
+@dataclass
+class GoalProgress:
+    today_pl:    float   # equity change since prior close ($)
+    goal:        float   # daily target ($)
+    equity:      float
+    mtd_pl:      float = 0.0   # month-to-date realised+unrealised change
+    days_elapsed: int  = 0
+
+    def pct_of_goal(self) -> float:
+        return (self.today_pl / self.goal * 100) if self.goal else 0.0
+
+    def hit(self) -> bool:
+        return self.today_pl >= self.goal
+
+    def css_class(self) -> str:
+        return "ok" if self.hit() else "warn" if self.today_pl > 0 else "no"
+
+    def emoji(self) -> str:
+        return "✅" if self.hit() else "🟡" if self.today_pl > 0 else "🔴"
+
+    def required_annual_pct(self) -> float:
+        """Annualised return implied by the daily goal (252 trading days)."""
+        return (self.goal * 252 / self.equity * 100) if self.equity else 0.0
+
+
+def track_goal(cfg: Config, broker=None) -> Optional[GoalProgress]:
+    """Compute today's P&L against the daily goal using Alpaca account equity."""
+    if broker is None:
+        return None
+    try:
+        acct   = broker.api.get_account()
+        equity = float(acct.equity)
+        last   = float(acct.last_equity or equity)
+        today  = equity - last
+        gp = GoalProgress(today_pl=today, goal=cfg.daily_goal, equity=equity)
+        log.info(
+            f"Daily goal: ${today:+,.2f} / ${cfg.daily_goal:,.0f} "
+            f"({gp.pct_of_goal():.0f}%) — equity ${equity:,.2f}"
+        )
+        return gp
+    except Exception as e:
+        log.warning(f"Could not compute goal progress: {e}")
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1325,9 +1418,11 @@ class TradeExecutor:
       • Minimum qty = 1; skip if risk_per_share ≤ 0
     """
 
-    MAX_POSITIONS = 10       # raised from 3 — was blocking all new entries
+    MAX_POSITIONS = 8        # 8 × ~12% avg = fully deployed without over-concentration
     RISK_PCT      = 0.015    # 1.5% of portfolio per trade
     MAX_SIZE_PCT  = 0.15     # 15% of portfolio per position
+    MIN_SIZE_PCT  = 0.02     # 2% floor — below this a position can't move the needle
+    MIN_RR        = 1.8      # reject setups whose R:R is worse than this
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -1438,12 +1533,27 @@ class TradeExecutor:
                 log.info(f"  {ticker}: on no-reentry list (stopped out today) — skip.")
                 continue
 
+            # Filter: R:R must clear the minimum — thin-edge setups are a profit leak
+            rr = result.rr()
+            if rr < self.MIN_RR:
+                log.info(f"  {ticker}: R:R={rr} < {self.MIN_RR} — skip.")
+                continue
+
             # Size order (halved when VIX 20-40)
             qty = self._size_order(result.price, result.stop, portfolio)
             if vix_size_half:
                 qty = max(1, qty // 2)
             if qty < 1:
                 log.info(f"  {ticker}: qty=0 after sizing (price=${result.price:.2f} stop=${result.stop:.2f}) — skip.")
+                continue
+
+            # Filter: minimum position size — reject dust that can't contribute to P&L
+            notional = qty * result.price
+            if notional < portfolio * self.MIN_SIZE_PCT:
+                log.info(
+                    f"  {ticker}: ${notional:,.0f} < {self.MIN_SIZE_PCT*100:.0f}% floor "
+                    f"(${portfolio*self.MIN_SIZE_PCT:,.0f}) — too small to matter, skip."
+                )
                 continue
 
             risk_amt  = (result.price - result.stop) * qty
@@ -1702,6 +1812,7 @@ class PositionMonitor:
                     log.info(f"  → EXIT ({reason})")
                     self._exit(symbol, qty)
                     _add_no_reentry(symbol)
+                    _clear_trim(symbol)
                     actions.append(MonitorAction(symbol, "exit", reason, cur_price, qty, entry_price, pl_pct))
                     continue
 
@@ -1712,16 +1823,28 @@ class PositionMonitor:
                     log.info(f"  → EXIT ({reason})")
                     self._exit(symbol, qty)
                     _add_no_reentry(symbol)
+                    _clear_trim(symbol)
                     actions.append(MonitorAction(symbol, "exit", reason, cur_price, qty, entry_price, pl_pct))
                     continue
 
-                # Priority 3: Trim at target
+                # Priority 3: Trim at target — capped so a winner isn't shredded
+                # by repeated trims on every 15-min tick it sits above target.
                 if cur_price >= target and qty >= 2:
-                    trimmed = self._trim(symbol, qty)
-                    reason  = f"Target reached: ${cur_price:.2f} ≥ ${target:.2f} → sold {trimmed} shares ({pl_pct:+.1f}%)"
-                    log.info(f"  → TRIM ({reason})")
-                    actions.append(MonitorAction(symbol, "trim", reason, cur_price, trimmed, entry_price, pl_pct))
-                    continue
+                    trims_done = _trim_count(symbol)
+                    if trims_done >= MAX_TRIMS_PER_POSITION:
+                        log.info(
+                            f"  → HOLD RUNNER — already trimmed {trims_done}x, "
+                            f"letting remainder run on trailing stop"
+                        )
+                    else:
+                        trimmed = self._trim(symbol, qty)
+                        _record_trim(symbol)
+                        reason = (f"Target reached: ${cur_price:.2f} ≥ ${target:.2f} → "
+                                  f"sold {trimmed} sh ({pl_pct:+.1f}%) "
+                                  f"[trim {trims_done+1}/{MAX_TRIMS_PER_POSITION}]")
+                        log.info(f"  → TRIM ({reason})")
+                        actions.append(MonitorAction(symbol, "trim", reason, cur_price, trimmed, entry_price, pl_pct))
+                        continue
 
                 # Priority 4: Trailing stop alert — notify when stop should be raised
                 if atr > 0 and entry_price > 0 and cur_price > entry_price:
@@ -2324,9 +2447,27 @@ if __name__ == "__main__":
                   </tr>{mon_rows}
                 </table>"""
 
+            # Daily goal progress
+            goal_section = ""
+            try:
+                _gp = track_goal(cfg, monitor.broker)
+                if _gp:
+                    goal_section = f"""
+                    <h3>🎯 Daily Goal</h3>
+                    <table>
+                      <tr><td>Today P&amp;L</td>
+                          <td class="{_gp.css_class()}">{_gp.emoji()} ${_gp.today_pl:+,.2f}</td></tr>
+                      <tr><td>Goal</td><td>${_gp.goal:,.0f}/day
+                          <span style="color:#9e9e9e;font-size:11px"> — {_gp.pct_of_goal():.0f}% there</span></td></tr>
+                      <tr><td>Equity</td><td>${_gp.equity:,.2f}</td></tr>
+                    </table>"""
+            except Exception:
+                pass
+
             html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
             <style>{_CSS}</style></head><body><div class="card">
             <h2>⏱ 15-MIN UPDATE — {date_str} {time_str}</h2>
+            {goal_section}
             {trade_section}
             {monitor_section}
             <p class="foot">QQQ Swing Suite · Monitor · {now_et.strftime('%Y-%m-%d %H:%M ET')}</p>
