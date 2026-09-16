@@ -10,6 +10,12 @@ applied to QQQ (Invesco QQQ Trust — Nasdaq-100 ETF).
 | `QQQ_SwingSuite.pine` | TradingView Pine Script v5 — paste into Pine Editor and add to chart |
 | `INVESTING_RULES.md` | Full rulebook with entry checklists, sizing, stops, and exit rules |
 
+## Also in this repo
+
+| Tool | Description |
+|------|-------------|
+| [`video_sorter/`](video_sorter/README.md) | Stellar Sorter — a video file sorting app (browser UI + CLI) with a dark intergalactic theme. Standard library only: `python3 -m video_sorter serve ~/Videos` |
+
 ## Traders & Strategies Included
 
 | Trader | Strategy | What's in the Suite |
