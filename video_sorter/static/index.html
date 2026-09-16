@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="void">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stellar Sorter — Video Archive Control</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🛸</text></svg>">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<canvas id="starfield" aria-hidden="true"></canvas>
+<div class="nebula nebula--violet" aria-hidden="true"></div>
+<div class="nebula nebula--cyan" aria-hidden="true"></div>
+<div class="nebula nebula--rose" aria-hidden="true"></div>
+
+<header class="masthead">
+  <div class="brand">
+    <span class="brand__mark" aria-hidden="true">
+      <svg viewBox="0 0 40 40" width="34" height="34">
+        <circle cx="20" cy="20" r="8.5" fill="none" stroke="url(#ring)" stroke-width="2.2"/>
+        <ellipse cx="20" cy="20" rx="17" ry="6" fill="none" stroke="url(#ring)"
+                 stroke-width="1.6" opacity=".75" transform="rotate(-24 20 20)"/>
+        <circle cx="20" cy="20" r="2.6" fill="#e9d5ff"/>
+        <defs>
+          <linearGradient id="ring" x1="0" y1="0" x2="40" y2="40">
+            <stop offset="0%" stop-color="#22d3ee"/>
+            <stop offset="55%" stop-color="#a78bfa"/>
+            <stop offset="100%" stop-color="#f472b6"/>
+          </linearGradient>
+        </defs>
+      </svg>
+    </span>
+    <span class="brand__text">
+      <strong>Stellar Sorter</strong>
+      <em>video archive control</em>
+    </span>
+  </div>
+  <div class="masthead__status">
+    <span id="probe-status" class="chip chip--muted" title="ffprobe supplies duration, resolution and codec">
+      probing offline
+    </span>
+    <span id="root-status" class="chip chip--muted">no sector scanned</span>
+  </div>
+</header>
+
+<main class="deck">
+  <!-- ══════════════ CONTROL PANEL ══════════════ -->
+  <aside class="panel console" aria-label="Controls">
+
+    <section class="console__block">
+      <h2 class="console__title"><span class="console__num">01</span> Sector</h2>
+      <label class="field">
+        <span class="field__label">Scan directory</span>
+        <span class="field__row">
+          <input id="scan-path" type="text" spellcheck="false" placeholder="~/Videos" autocomplete="off">
+          <button id="browse-btn" class="btn btn--ghost" type="button" title="Browse directories">···</button>
+        </span>
+      </label>
+      <div class="toggles">
+        <label class="switch"><input id="opt-recursive" type="checkbox" checked><span></span>Recurse subfolders</label>
+        <label class="switch"><input id="opt-probe" type="checkbox" checked><span></span>Deep scan (ffprobe)</label>
+      </div>
+      <button id="scan-btn" class="btn btn--primary btn--block" type="button">
+        <span class="btn__glyph" aria-hidden="true">◎</span> Launch scan
+      </button>
+    </section>
+
+    <section class="console__block">
+      <h2 class="console__title"><span class="console__num">02</span> Filters</h2>
+      <label class="field">
+        <span class="field__label">Search name or path</span>
+        <input id="filter-query" type="search" spellcheck="false" placeholder="nebula, .mkv, 2024…" autocomplete="off">
+      </label>
+      <div class="field-pair">
+        <label class="field">
+          <span class="field__label">Min size (MB)</span>
+          <input id="filter-min-size" type="number" min="0" step="10" placeholder="0">
+        </label>
+        <label class="field">
+          <span class="field__label">Min length (min)</span>
+          <input id="filter-min-duration" type="number" min="0" step="1" placeholder="0">
+        </label>
+      </div>
+      <div class="field">
+        <span class="field__label">Format</span>
+        <div id="filter-extensions" class="pill-group" role="group" aria-label="Filter by format"></div>
+      </div>
+      <div class="field">
+        <span class="field__label">Resolution</span>
+        <div id="filter-resolutions" class="pill-group" role="group" aria-label="Filter by resolution"></div>
+      </div>
+      <button id="clear-filters" class="btn btn--ghost btn--block" type="button">Clear filters</button>
+    </section>
+
+    <section class="console__block">
+      <h2 class="console__title"><span class="console__num">03</span> Destination</h2>
+      <label class="field">
+        <span class="field__label">Sort into</span>
+        <input id="dest-path" type="text" spellcheck="false" placeholder="~/Videos/Sorted" autocomplete="off">
+      </label>
+      <label class="field">
+        <span class="field__label">Group by</span>
+        <select id="rule-select"></select>
+      </label>
+      <label class="field">
+        <span class="field__label">Operation</span>
+        <div class="segmented" role="radiogroup" aria-label="Operation">
+          <label><input type="radio" name="action" value="move" checked><span>Move</span></label>
+          <label><input type="radio" name="action" value="copy"><span>Copy</span></label>
+        </div>
+      </label>
+      <button id="plan-btn" class="btn btn--primary btn--block" type="button" disabled>
+        <span class="btn__glyph" aria-hidden="true">✧</span> Plot course
+      </button>
+      <p class="hint">Nothing moves until you review the plan and confirm.</p>
+    </section>
+
+    <section class="console__block console__block--log">
+      <h2 class="console__title"><span class="console__num">04</span> Telemetry</h2>
+      <ol id="log" class="log" aria-live="polite"></ol>
+    </section>
+  </aside>
+
+  <!-- ══════════════ FILE TABLE ══════════════ -->
+  <section class="panel viewport" aria-label="Video files">
+    <div class="viewport__bar">
+      <div class="readout" id="readout">
+        <span class="readout__metric"><b id="stat-count">0</b><i>files</i></span>
+        <span class="readout__metric"><b id="stat-size">0 B</b><i>total</i></span>
+        <span class="readout__metric"><b id="stat-duration">—</b><i>runtime</i></span>
+        <span class="readout__metric"><b id="stat-selected">0</b><i>selected</i></span>
+      </div>
+      <div class="viewport__actions">
+        <button id="select-all" class="btn btn--ghost btn--sm" type="button">Select all</button>
+        <button id="select-none" class="btn btn--ghost btn--sm" type="button">Clear</button>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="grid">
+        <thead>
+          <tr>
+            <th class="grid__check"><input id="head-check" type="checkbox" aria-label="Select all visible"></th>
+            <th data-sort="name">Name</th>
+            <th data-sort="extension" class="num">Format</th>
+            <th data-sort="size" class="num">Size</th>
+            <th data-sort="duration" class="num">Length</th>
+            <th data-sort="resolution" class="num">Resolution</th>
+            <th data-sort="codec" class="num">Codec</th>
+            <th data-sort="modified" class="num">Modified</th>
+          </tr>
+        </thead>
+        <tbody id="grid-body"></tbody>
+      </table>
+      <div id="empty" class="empty">
+        <div class="empty__orb" aria-hidden="true"></div>
+        <p class="empty__title">No signals detected</p>
+        <p class="empty__text">Point the scanner at a directory and launch a scan.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ══════════════ PLAN REVIEW ══════════════ -->
+<div id="plan-modal" class="modal" hidden>
+  <div class="modal__backdrop" data-close></div>
+  <div class="modal__body panel" role="dialog" aria-modal="true" aria-labelledby="plan-title">
+    <header class="modal__head">
+      <h2 id="plan-title">Flight plan</h2>
+      <button class="btn btn--ghost btn--sm" type="button" data-close aria-label="Close">✕</button>
+    </header>
+    <p id="plan-summary" class="modal__summary"></p>
+    <div id="plan-buckets" class="bucket-row"></div>
+    <div class="modal__scroll">
+      <table class="grid grid--plan">
+        <thead><tr><th>File</th><th>Destination</th></tr></thead>
+        <tbody id="plan-body"></tbody>
+      </table>
+    </div>
+    <footer class="modal__foot">
+      <span id="plan-warning" class="hint hint--warn"></span>
+      <span class="modal__spacer"></span>
+      <button class="btn btn--ghost" type="button" data-close>Abort</button>
+      <button id="apply-btn" class="btn btn--danger" type="button">
+        <span class="btn__glyph" aria-hidden="true">⇥</span> Engage
+      </button>
+    </footer>
+  </div>
+</div>
+
+<!-- ══════════════ DIRECTORY BROWSER ══════════════ -->
+<div id="browse-modal" class="modal" hidden>
+  <div class="modal__backdrop" data-close></div>
+  <div class="modal__body panel modal__body--narrow" role="dialog" aria-modal="true" aria-labelledby="browse-title">
+    <header class="modal__head">
+      <h2 id="browse-title">Navigate</h2>
+      <button class="btn btn--ghost btn--sm" type="button" data-close aria-label="Close">✕</button>
+    </header>
+    <p id="browse-path" class="modal__summary mono"></p>
+    <div class="modal__scroll">
+      <ul id="browse-list" class="browse"></ul>
+    </div>
+    <footer class="modal__foot">
+      <span class="modal__spacer"></span>
+      <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+      <button id="browse-pick" class="btn btn--primary" type="button">Use this directory</button>
+    </footer>
+  </div>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script>window.SORTER_TOKEN = "__TOKEN__";</script>
+<script src="/static/app.js"></script>
+</body>
+</html>
